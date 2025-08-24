@@ -1,0 +1,50 @@
+###  Guide d'Installation et d'Utilisation
+##   Installation des Dépendances
+
+# Installer Python 3.8+
+# Installer Ollama (https://ollama.ai)
+# Installer les dépendances Python
+
+pip install requests ollama aiohttp beautifulsoup4 pandas python-dotenv
+
+
+## Téléchargement du Modèle Ollama
+# Télécharger le modèle (llama3.1 recommandé)
+ollama pull llama3.1
+
+# Ou pour un modèle plus spécialisé
+ollama pull codellama:7b
+
+## Exécution de l'Analyseur
+# Exécuter l'analyseur complet
+python ultimate_analyzer.py
+
+# Exécuter avec des paramètres personnalisés
+python ultimate_analyzer.py --pages 5 --section 159
+
+## Consultation des Résultats
+Les résultats sont disponibles dans :
+  crypto_analysis.db : Base de données SQLite complète
+  crypto_analysis_report.json : Rapport synthétique JSON
+  crypto_analysis.log : Logs détaillés de l'analyse
+
+## Fonctionnalités Avancées
+Analyse Technique Profonde
+  Score d'innovation : Nouveauté réelle vs marketing
+  Disruptivité potentielle : Impact marché
+  Qualité architecturale : Robustesse technique
+
+  Détection des Clones: Identification des forks sans innovation
+  Analyse comparative avec les projets existants
+  Détection des copier-coller techniques
+
+Évaluation du Premine
+  Pourcentage estimé de premine
+  Impact sur la décentralisation
+  Justification technique/économique
+
+Analyse des Liens
+  Détection automatique GitHub, whitepapers, sites web
+  Validation des ressources techniques
+  Vérification de l'activité des repositories
+
