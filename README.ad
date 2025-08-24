@@ -87,8 +87,8 @@ The scanner provides:
 
 ```bash
 # Clone the repository
-git clone https://ggit@github.com:zabuzafr/BitcoinTalkAnnonce.git
-cd bitcointalk-pow-scanner
+git clone https://github.com/zabuzafr/BitcoinTalkAnnonce.git
+cd BitcoinTalkAnnonce
 
 # Install dependencies
 pip install -r requirements.txt
