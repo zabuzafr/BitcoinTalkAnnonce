@@ -20,6 +20,8 @@ import ollama
 import pandas as pd
 from bs4 import BeautifulSoup
 
+from i18n import T
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -129,7 +131,7 @@ class UltimateBitcointalkAnalyzer:
                 FOREIGN KEY (topic_id) REFERENCES projects (topic_id)
             );
             ''')
-        logger.info("Base de données initialisée")
+        logger.info(T.t("console.logger_db_init"))
 
     async def init_session(self) -> None:
         """Initialise la session HTTP asynchrone"""
@@ -156,12 +158,12 @@ class UltimateBitcointalkAnalyzer:
                         return await response.text()
                     if response.status == 429:
                         wait_time = 2 ** attempt
-                        logger.warning(f"Rate limit hit, waiting {wait_time}s")
+                        logger.warning(T.t("console.logger_rate_limit", seconds=wait_time))
                         await asyncio.sleep(wait_time)
                         continue
-                    logger.warning(f"HTTP {response.status} for {url}")
+                    logger.warning(T.t("console.logger_http_error", status=response.status, url=url))
             except Exception as e:
-                logger.error(f"Attempt {attempt + 1} failed: {e}")
+                logger.error(T.t("console.logger_attempt_failed", attempt=attempt + 1, error=e))
             await asyncio.sleep(1)
         return None
 
@@ -240,18 +242,18 @@ class UltimateBitcointalkAnalyzer:
         try:
             result_text = await loop.run_in_executor(None, _chat)
         except Exception as e:
-            logger.error(f"Erreur analyse technique: {e}")
+            logger.error(T.t("console.logger_analysis_error", error=e))
             return {}
 
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
         if not json_match:
-            logger.warning("Aucun JSON trouvé dans la réponse du modèle")
+            logger.warning(T.t("console.logger_json_not_found"))
             return {}
 
         try:
             analysis = json.loads(json_match.group())
         except json.JSONDecodeError as e:
-            logger.error(f"JSON invalide de l'analyse: {e}")
+            logger.error(T.t("console.logger_json_invalid", error=e))
             return {}
 
         for score_key in ('innovation_score', 'disruptiveness_score', 'technical_score'):
@@ -356,7 +358,7 @@ class UltimateBitcointalkAnalyzer:
     async def process_announcement(self, topic_id: int, url: str) -> None:
         """Traite une annonce complète"""
         try:
-            logger.info(f"Traitement de l'annonce {topic_id}")
+            logger.info(T.t("console.logger_processing", topic_id=topic_id))
 
             html = await self.fetch_with_retry(url)
             if not html:
@@ -377,9 +379,7 @@ class UltimateBitcointalkAnalyzer:
 
             technical_analysis = await self.analyze_technical_depth(content)
             if not technical_analysis:
-                logger.warning(
-                    f"Annonce {topic_id}: analyse technique vide, scores neutralisés"
-                )
+                logger.warning(T.t("console.logger_empty_analysis", topic_id=topic_id))
                 has_analysis = False
             else:
                 has_analysis = True
@@ -420,10 +420,10 @@ class UltimateBitcointalkAnalyzer:
             self.analyzed_count += 1
 
             if final_score >= 75:
-                logger.warning(f"🎯 PROJET PROMETTEUR: {title} (Score: {final_score}/100)")
+                logger.warning(T.t("console.logger_promising", title=title, score=final_score))
 
         except Exception as e:
-            logger.error(f"Erreur traitement annonce {topic_id}: {e}")
+            logger.error(T.t("console.logger_process_error", topic_id=topic_id, error=e))
 
     def save_project(self, project: CryptoProject) -> None:
         """Sauvegarde un projet en base de données"""
@@ -455,9 +455,9 @@ class UltimateBitcointalkAnalyzer:
                     (project.topic_id, datetime.now().isoformat(), project.final_score,
                      "Analyse automatique")
                 )
-            logger.info(f"Projet {project.topic_id} sauvegardé (Score: {project.final_score})")
+            logger.info(T.t("console.logger_saved", topic_id=project.topic_id, score=project.final_score))
         except Exception as e:
-            logger.error(f"Erreur sauvegarde projet: {e}")
+            logger.error(T.t("console.logger_save_error", error=e))
 
     async def scan_bitcointalk_section(self, section_id: Optional[int] = None, pages: Optional[int] = None) -> None:
         """Scan une section de Bitcointalk"""
@@ -469,7 +469,7 @@ class UltimateBitcointalkAnalyzer:
         try:
             for page in range(pages):
                 url = f"{self.base_url}/index.php?board={section_id}.{page * 40}"
-                logger.info(f"Scan de la page {page + 1}/{pages}")
+                logger.info(T.t("console.logger_scan_page", page=page + 1, total=pages))
 
                 html = await self.fetch_with_retry(url)
                 if not html:
@@ -554,21 +554,28 @@ class UltimateBitcointalkAnalyzer:
 
 
 def parse_args() -> argparse.Namespace:
+    model_default = os.environ.get('BT_MODEL', 'llama3.1')
+    base_url_default = os.environ.get('BT_BASE_URL', 'https://bitcointalk.org')
+    section_default = int(os.environ.get('BT_BOARD_ID', '159'))
+    pages_default = int(os.environ.get('BT_PAGES', '2'))
+    db_default = os.environ.get('BT_DB_PATH', 'crypto_analysis.db')
+    timeout_default = int(os.environ.get('BT_TIMEOUT', '30'))
+
     parser = argparse.ArgumentParser(
-        description="Agent d'analyse technique des annonces Bitcointalk"
+        description=T.t("cli.description")
     )
-    parser.add_argument('--model', default=os.environ.get('BT_MODEL', 'llama3.1'),
-                        help="Modèle Ollama à utiliser (default: llama3.1)")
-    parser.add_argument('--base-url', default=os.environ.get('BT_BASE_URL', 'https://bitcointalk.org'),
-                        help="URL racine du forum (default: https://bitcointalk.org)")
-    parser.add_argument('--section', type=int, default=int(os.environ.get('BT_BOARD_ID', '159')),
-                        help="ID de section Bitcointalk (default: 159)")
-    parser.add_argument('--pages', type=int, default=int(os.environ.get('BT_PAGES', '2')),
-                        help="Nombre de pages à scanner (default: 2)")
-    parser.add_argument('--db', default=os.environ.get('BT_DB_PATH', 'crypto_analysis.db'),
-                        help="Chemin de la base SQLite (default: crypto_analysis.db)")
-    parser.add_argument('--timeout', type=int, default=int(os.environ.get('BT_TIMEOUT', '30')),
-                        help="Timeout HTTP en secondes (default: 30)")
+    parser.add_argument('--model', default=model_default,
+                        help=T.t("cli.help_model", value=model_default))
+    parser.add_argument('--base-url', default=base_url_default,
+                        help=T.t("cli.help_base_url", value=base_url_default))
+    parser.add_argument('--section', type=int, default=section_default,
+                        help=T.t("cli.help_section", value=section_default))
+    parser.add_argument('--pages', type=int, default=pages_default,
+                        help=T.t("cli.help_pages", value=pages_default))
+    parser.add_argument('--db', default=db_default,
+                        help=T.t("cli.help_db", value=db_default))
+    parser.add_argument('--timeout', type=int, default=timeout_default,
+                        help=T.t("cli.help_timeout", value=timeout_default))
     return parser.parse_args()
 
 
@@ -584,44 +591,44 @@ async def main() -> int:
         timeout=args.timeout,
     )
 
-    print("🚀 Ultimate Bitcointalk Analyzer")
-    print(f"📊 Scan technique complet (section {args.section}, {args.pages} pages, modèle {args.model})")
+    print(T.t("console.banner"))
+    print(T.t("console.scan_info", section=args.section, pages=args.pages, model=args.model))
     print("=" * 60)
 
     scan_error: Optional[BaseException] = None
     try:
-        print("🔍 Scan des annonces récentes...")
+        print(T.t("console.scan_running"))
         await analyzer.scan_bitcointalk_section()
     except BaseException as e:
         scan_error = e
-        logger.error(f"Erreur lors du scan: {e}")
+        logger.error(T.t("console.logger_scan_error", error=e))
 
     try:
-        print("\n📈 Génération du rapport...")
+        print("\n" + T.t("console.report_generating"))
         report = analyzer.generate_report()
 
-        print(f"\n✅ Analyse terminée!")
-        print(f"📊 Projets analysés: {report['total_projects']}")
-        print(f"🎯 Projets prometteurs: {report['promising_projects']}")
-        print(f"⭐ Score moyen: {report['average_score']:.1f}/100")
+        print("\n" + T.t("console.analysis_done"))
+        print(T.t("console.projects_analyzed", count=report['total_projects']))
+        print(T.t("console.projects_promising", count=report['promising_projects']))
+        print(T.t("console.avg_score", score=f"{report['average_score']:.1f}"))
 
         if report['promising_projects'] > 0:
-            print(f"\n🏆 TOP PROJETS:")
+            print("\n" + T.t("console.top_projects"))
             for i, project in enumerate(report['top_projects'][:5], 1):
                 if project['is_promising']:
                     print(f"{i}. {project['title']}")
-                    print(f"   👤 Auteur: {project['author']}")
-                    print(f"   ⭐ Score: {project['final_score']}/100")
-                    print(f"   ⚙️  Algo: {project['mining_algorithm']}")
-                    print(f"   🔗 GitHub: {project['github_link'][:50]}..." if project['github_link'] else "   🔗 GitHub: Non fourni")
+                    print(T.t("console.project_author", author=project['author']))
+                    print(T.t("console.project_score", score=project['final_score']))
+                    print(T.t("console.project_algo", algo=project['mining_algorithm']))
+                    print(T.t("console.project_github", link=project['github_link'][:50]) if project['github_link'] else T.t("console.project_github_none"))
                     print()
     except Exception as e:
-        logger.error(f"Erreur lors de la génération du rapport: {e}")
+        logger.error(T.t("console.logger_report_error", error=e))
         if scan_error is None:
             return 1
     finally:
-        print(f"📁 Rapport sauvegardé: crypto_analysis_report.json")
-        print(f"📊 Base de données: {analyzer.db_path}")
+        print(T.t("console.report_saved", path="crypto_analysis_report.json"))
+        print(T.t("console.db_path", path=analyzer.db_path))
 
     return 1 if scan_error is not None else 0
 

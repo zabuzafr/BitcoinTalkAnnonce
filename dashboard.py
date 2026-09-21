@@ -4,10 +4,12 @@ import json
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+
+from i18n import DEFAULT_LANG, T, available_languages
 
 DB_PATH = os.environ.get("BT_DB_PATH", str(Path(__file__).parent / "crypto_analysis.db"))
 
@@ -70,6 +72,11 @@ def _row_to_project(row: sqlite3.Row, include_lists: bool = False) -> Dict[str, 
     return data
 
 
+def _t(request: Request, key: str, **kwargs: Any) -> str:
+    lang = T.resolve(getattr(request, "headers", {}).get("accept-language"))
+    return T.t(key, lang=lang, **kwargs)
+
+
 @app.get("/")
 def dashboard() -> HTMLResponse:
     html = """<!DOCTYPE html>
@@ -82,8 +89,10 @@ def dashboard() -> HTMLResponse:
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #e6edf3; }
 .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-h1 { font-size: 1.8rem; margin-bottom: 20px; font-weight: 600; }
+h1 { font-size: 1.8rem; margin-bottom: 20px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 h1 span { color: #f7931a; }
+.lang-select { padding: 6px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.85rem; font-weight: 400; }
+.lang-select:focus { outline: none; border-color: #58a6ff; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 30px; }
 .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
 .stat-card .label { font-size: 0.8rem; color: #8b949e; margin-bottom: 4px; }
@@ -141,25 +150,67 @@ a.link:hover { text-decoration: underline; }
 </head>
 <body>
 <div class="container">
-  <h1>BitcoinTalk — <span>Tableau de bord</span></h1>
+  <h1><span class="h1-left">BitcoinTalk — <span data-i18n="dashboard.h1_sub"></span></span>
+  <label data-i18n="dashboard.lang_label">Langue</label> <select id="lang-select" class="lang-select"></select></h1>
   <div id="stats">
-    <div class="loading">Chargement…</div>
+    <div class="loading" data-i18n="dashboard.loading">Chargement…</div>
   </div>
-  <input type="text" id="search" class="search" placeholder="Rechercher par titre, auteur, algorithme…">
+  <input type="text" id="search" class="search" data-i18n-ph="dashboard.search_placeholder" placeholder="Rechercher par titre, auteur, algorithme…">
   <div id="table-wrap">
-    <div class="loading">Chargement…</div>
+    <div class="loading" data-i18n="dashboard.loading">Chargement…</div>
   </div>
 </div>
 
 <div class="detail-overlay" id="detail-overlay" onclick="if(event.target===this)closeDetail()">
   <div class="detail-content" id="detail-content" style="position:relative">
     <button class="detail-close" onclick="closeDetail()">&times;</button>
-    <div id="detail-body"><div class="loading">Chargement…</div></div>
+    <div id="detail-body"><div class="loading" data-i18n="dashboard.loading">Chargement…</div></div>
   </div>
 </div>
 
 <script>
 let allProjects = [];
+let CATALOG = {};
+let LANG = '__DEFAULT_LANG__';
+
+function detectLang() {
+  try {
+    const stored = localStorage.getItem('bt_lang');
+    if (stored && stored.split('-')[0]) return stored.split('-')[0].toLowerCase();
+  } catch (e) {}
+  return '__DEFAULT_LANG__';
+}
+LANG = detectLang();
+
+function t(key) {
+  const parts = key.split('.');
+  let v = CATALOG;
+  for (const p of parts) { v = v && v[p]; }
+  return (v != null) ? String(v) : key;
+}
+
+function tfmt(key, params) {
+  let s = t(key);
+  if (params) {
+    for (const k of Object.keys(params)) s = s.split('{' + k + '}').join(params[k]);
+  }
+  return s;
+}
+
+function applyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    el.innerHTML = tfmt(el.getAttribute('data-i18n'));
+  });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+    el.setAttribute('placeholder', t(el.getAttribute('data-i18n-ph')));
+  });
+  const h1sub = document.querySelector('.h1-left');
+  if (h1sub) h1sub.innerHTML = 'BitcoinTalk — <span>' + t('dashboard.h1_sub') + '</span>';
+  const select = document.getElementById('lang-select');
+  if (select) select.value = LANG;
+  document.title = t('dashboard.title');
+  document.documentElement.lang = LANG;
+}
 
 async function fetchJSON(url) {
   const r = await fetch(url);
@@ -167,18 +218,26 @@ async function fetchJSON(url) {
   return r.json();
 }
 
+async function loadCatalog(lang) {
+  CATALOG = await fetchJSON('/api/i18n/' + lang);
+}
+
 async function loadStats() {
   try {
     const s = await fetchJSON('/api/stats');
-    document.getElementById('stats').innerHTML = `
-      <div class="stat-card"><div class="label">Projets analysés</div><div class="value">${s.total_projects}</div></div>
-      <div class="stat-card"><div class="label">Prometteurs (≥75)</div><div class="value good">${s.promising_count}</div></div>
-      <div class="stat-card"><div class="label">Score moyen</div><div class="value">${s.avg_final_score ?? '—'}</div></div>
-      <div class="stat-card"><div class="label">Forks détectés</div><div class="value bad">${s.fork_count}</div></div>
-      <div class="stat-card"><div class="label">Score max</div><div class="value good">${s.max_final_score ?? '—'}</div></div>
-      <div class="stat-card"><div class="label">Dernière analyse</div><div class="value" style="font-size:0.9rem">${(s.last_analysis || '—')}</div></div>`;
+    const cards = [
+      { label: t('dashboard.stat_total'), value: s.total_projects, cls: '' },
+      { label: t('dashboard.stat_promising'), value: s.promising_count, cls: 'good' },
+      { label: t('dashboard.stat_avg'), value: (s.avg_final_score != null) ? s.avg_final_score : t('dashboard.list_empty'), cls: '' },
+      { label: t('dashboard.stat_forks'), value: s.fork_count, cls: 'bad' },
+      { label: t('dashboard.stat_max'), value: (s.max_final_score != null) ? s.max_final_score : t('dashboard.list_empty'), cls: 'good' },
+      { label: t('dashboard.stat_last'), value: (s.last_analysis || t('dashboard.list_empty')), cls: '', small: true }
+    ];
+    document.getElementById('stats').innerHTML = cards.map(c =>
+      '<div class="stat-card"><div class="label">' + esc(c.label) + '</div><div class="value ' + c.cls + '"' + (c.small ? ' style="font-size:0.9rem"' : '') + '>' + esc(c.value) + '</div></div>'
+    ).join('');
   } catch (e) {
-    document.getElementById('stats').innerHTML = '<div class="empty">Erreur chargement stats: ' + e.message + '</div>';
+    document.getElementById('stats').innerHTML = '<div class="empty">' + tfmt('dashboard.error_stats', { error: e.message }) + '</div>';
   }
 }
 
@@ -198,28 +257,38 @@ function esc(s) {
 function renderTable(projects) {
   const wrap = document.getElementById('table-wrap');
   if (!projects.length) {
-    wrap.innerHTML = '<div class="empty">Aucun projet analysé pour le moment. Lancez <code>python bitcointalk.py</code> pour scanner Bitcointalk.</div>';
+    wrap.innerHTML = '<div class="empty">' + t('dashboard.empty_projects') + '</div>';
     return;
   }
   let rows = projects.map(p => {
-    const link = p.topic_id ? `https://bitcointalk.org/index.php?topic=${p.topic_id}` : '';
-    return `<tr onclick="openDetail(${p.topic_id})">
-      <td><a class="title-link" href="${link}" target="_blank" onclick="event.stopPropagation()">${esc(p.title || '—')}</a></td>
-      <td>${esc(p.author || '—')}</td>
-      <td><div class="meta-item"><div class="k">Tech ${esc(p.technical_score ?? '—')} / Inno ${esc(p.innovation_score ?? '—')} / Disrupt. ${esc(p.disruptiveness_score ?? '—')} / Crédib. ${esc(p.credibility_score ?? '—')}</div></td>
-      <td><span class="score ${scoreClass(p.final_score)}">${p.final_score ?? '—'}</span></td>
-      <td>${p.is_fork ? '<span class="badge fork">Fork: ' + esc(p.fork_base || '?') + '</span>' : '<span class="badge normal">Natif</span>'}</td>
-      <td>${p.is_promising ? '<span class="badge promising">Prometteur</span>' : ''}</td>
-    </tr>`;
+    const link = p.topic_id ? 'https://bitcointalk.org/index.php?topic=' + p.topic_id : '';
+    const meta = '<div class="meta-item"><div class="k">' +
+      t('dashboard.score_tech') + ' ' + esc(p.technical_score != null ? p.technical_score : '—') + ' / ' +
+      t('dashboard.score_inno') + ' ' + esc(p.innovation_score != null ? p.innovation_score : '—') + ' / ' +
+      t('dashboard.score_disp') + ' ' + esc(p.disruptiveness_score != null ? p.disruptiveness_score : '—') + ' / ' +
+      t('dashboard.score_cred') + ' ' + esc(p.credibility_score != null ? p.credibility_score : '—') +
+      '</div></div>';
+    const type = p.is_fork
+      ? '<span class="badge fork">' + tfmt('dashboard.badge_fork', { base: esc(p.fork_base || '?') }) + '</span>'
+      : '<span class="badge normal">' + t('dashboard.badge_native') + '</span>';
+    const status = p.is_promising ? '<span class="badge promising">' + t('dashboard.badge_promising') + '</span>' : '';
+    return '<tr onclick="openDetail(' + p.topic_id + ')">' +
+      '<td><a class="title-link" href="' + link + '" target="_blank" onclick="event.stopPropagation()">' + esc(p.title || '—') + '</a></td>' +
+      '<td>' + esc(p.author || '—') + '</td>' +
+      '<td>' + meta + '</td>' +
+      '<td><span class="score ' + scoreClass(p.final_score) + '">' + esc(p.final_score != null ? p.final_score : '—') + '</span></td>' +
+      '<td>' + type + '</td>' +
+      '<td>' + status + '</td>' +
+      '</tr>';
   }).join('');
-  wrap.innerHTML = `<table><thead><tr>
-    <th data-key="title">Titre</th>
-    <th data-key="author">Auteur</th>
-    <th>Scores</th>
-    <th data-key="final_score" class="score-col">Score final</th>
-    <th>Type</th>
-    <th>Statut</th>
-  </tr></thead><tbody>${rows}</tbody></table>`;
+  wrap.innerHTML = '<table><thead><tr>' +
+    '<th data-key="title">' + t('dashboard.col_title') + '</th>' +
+    '<th data-key="author">' + t('dashboard.col_author') + '</th>' +
+    '<th>' + t('dashboard.col_scores') + '</th>' +
+    '<th data-key="final_score" class="score-col">' + t('dashboard.col_score') + '</th>' +
+    '<th>' + t('dashboard.col_type') + '</th>' +
+    '<th>' + t('dashboard.col_status') + '</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>';
   document.querySelectorAll('th[data-key]').forEach(th => {
     th.addEventListener('click', () => sortTable(th.dataset.key, th));
   });
@@ -244,58 +313,61 @@ function sortTable(key, th) {
 
 async function openDetail(topicId) {
   const body = document.getElementById('detail-body');
-  body.innerHTML = '<div class="loading">Chargement…</div>';
+  body.innerHTML = '<div class="loading">' + t('dashboard.loading') + '</div>';
   document.getElementById('detail-overlay').classList.add('open');
   try {
     const p = await fetchJSON('/api/projects/' + topicId);
+    const dash = t('dashboard.list_empty');
     const list = (arr, cls) => (arr && arr.length)
-      ? '<ul>' + arr.map(x => `<li class="${cls}">${esc(x)}</li>`).join('') + '</ul>'
-      : '<li style="color:#8b949e">—</li>';
+      ? '<ul>' + arr.map(x => '<li class="' + cls + '">' + esc(x) + '</li>').join('') + '</ul>'
+      : '<li style="color:#8b949e">' + dash + '</li>';
     const bar = (label, val) => {
       const v = val ?? 0;
       const color = v >= 75 ? '#3fb950' : v >= 50 ? '#d29922' : '#f85149';
-      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:110px;font-size:0.8rem;color:#8b949e">${label}</div><div class="bar" style="flex:1"><div class="fill" style="width:${v}%;background:${color}"></div></div><div style="font-size:0.8rem;font-weight:700;width:30px;text-align:right">${v}</div></div>`;
+      return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:110px;font-size:0.8rem;color:#8b949e">' + label + '</div><div class="bar" style="flex:1"><div class="fill" style="width:' + v + '%;background:' + color + '"></div></div><div style="font-size:0.8rem;font-weight:700;width:30px;text-align:right">' + v + '</div></div>';
     };
     const links = [];
-    if (p.github_link) links.push(`<a class="link" href="${esc(p.github_link)}" target="_blank">GitHub</a>`);
-    if (p.whitepaper_link) links.push(`<a class="link" href="${esc(p.whitepaper_link)}" target="_blank">Whitepaper</a>`);
-    if (p.website_link) links.push(`<a class="link" href="${esc(p.website_link)}" target="_blank">Site</a>`);
-    if (p.topic_id) links.push(`<a class="link" href="https://bitcointalk.org/index.php?topic=${p.topic_id}" target="_blank">Topic Bitcointalk</a>`);
+    if (p.github_link) links.push('<a class="link" href="' + esc(p.github_link) + '" target="_blank">GitHub</a>');
+    if (p.whitepaper_link) links.push('<a class="link" href="' + esc(p.whitepaper_link) + '" target="_blank">Whitepaper</a>');
+    if (p.website_link) links.push('<a class="link" href="' + esc(p.website_link) + '" target="_blank">' + t('dashboard.detail_links').split(' ')[0] + '</a>');
+    if (p.topic_id) links.push('<a class="link" href="https://bitcointalk.org/index.php?topic=' + p.topic_id + '" target="_blank">Bitcointalk</a>');
+    const forkVal = p.is_fork ? tfmt('dashboard.detail_fork_yes', { base: esc(p.fork_base || '?') }) : t('dashboard.detail_fork_no');
+    const premineVal = (p.premine_percentage != null) ? esc(p.premine_percentage) + '%' : dash;
 
-    body.innerHTML = `
-      <h2>${esc(p.title || '—')}</h2>
-      <div class="detail-section">
-        <div style="display:flex;justify-content:space-between;align-items:baseline">
-          <span class="k" style="color:#8b949e;font-size:0.9rem">Score final</span>
-          <span class="score ${scoreClass(p.final_score)}" style="font-size:2rem">${p.final_score ?? '—'}</span>
-        </div>
-        <div style="margin-top:12px">${bar('Technique', p.technical_score)}${bar('Innovation', p.innovation_score)}${bar('Disruptivité', p.disruptiveness_score)}${bar('Credibilité', p.credibility_score)}</div>
-      </div>
-      <div class="detail-section"><h3>Informations</h3><div class="meta-grid">
-        <div class="meta-item"><div class="k">Auteur</div><div class="v">${esc(p.author || '—')}</div></div>
-        <div class="meta-item"><div class="k">Date du post</div><div class="v">${esc(p.post_date || '—')}</div></div>
-        <div class="meta-item"><div class="k">Algorithme de minage</div><div class="v">${esc(p.mining_algorithm || '—')}</div></div>
-        <div class="meta-item"><div class="k">Mécanisme de consensus</div><div class="v">${esc(p.consensus_mechanism || '—')}</div></div>
-        <div class="meta-item"><div class="k">Preminé</div><div class="v">${p.premine_percentage != null ? esc(p.premine_percentage) + '%' : '—'}</div></div>
-        <div class="meta-item"><div class="k">Fork</div><div class="v">${p.is_fork ? 'Oui — ' + esc(p.fork_base || '?') : 'Non'}</div></div>
-      </div></div>
-      ${links.length ? '<div class="detail-section"><h3>Liens</h3><div class="detail-links">' + links.join('') + '</div></div>' : ''}
-      <div class="detail-section"><h3>Points forts</h3>${list(p.strengths, 'good')}</div>
-      <div class="detail-section"><h3>Caractéristiques uniques</h3>${list(p.unique_features, 'feature')}</div>
-      <div class="detail-section"><h3>Signaux d'alerte</h3>${list(p.red_flags, 'flag')}</div>
-      <div class="detail-section"><h3>Contenu original</h3><p style="white-space:pre-wrap;font-size:0.85rem;color:#8b949e">${esc(p.content || '')}</p></div>
-      <div class="detail-section">
-        <div style="font-size:0.8rem;color:#8b949e">Analyse du ${esc(p.analysis_date || '—')}</div>
-        <div id="hist-${p.topic_id}" style="margin-top:8px"><div class="loading" style="padding:8px">Historique…</div></div>
-      </div>`;
+    body.innerHTML = '' +
+      '<h2>' + esc(p.title || dash) + '</h2>' +
+      '<div class="detail-section">' +
+      '  <div style="display:flex;justify-content:space-between;align-items:baseline">' +
+      '    <span class="k" style="color:#8b949e;font-size:0.9rem">' + t('dashboard.detail_score_final') + '</span>' +
+      '    <span class="score ' + scoreClass(p.final_score) + '" style="font-size:2rem">' + esc(p.final_score != null ? p.final_score : dash) + '</span>' +
+      '  </div>' +
+      '  <div style="margin-top:12px">' + bar(t('dashboard.detail_bar_tech'), p.technical_score) + bar(t('dashboard.detail_bar_inno'), p.innovation_score) + bar(t('dashboard.detail_bar_disp'), p.disruptiveness_score) + bar(t('dashboard.detail_bar_cred'), p.credibility_score) + '</div>' +
+      '</div>' +
+      '<div class="detail-section"><h3>' + t('dashboard.detail_info') + '</h3><div class="meta-grid">' +
+      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_author') + '</div><div class="v">' + esc(p.author || dash) + '</div></div>' +
+      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_date') + '</div><div class="v">' + esc(p.post_date || dash) + '</div></div>' +
+      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_algo') + '</div><div class="v">' + esc(p.mining_algorithm || dash) + '</div></div>' +
+      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_consensus') + '</div><div class="v">' + esc(p.consensus_mechanism || dash) + '</div></div>' +
+      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_premine') + '</div><div class="v">' + premineVal + '</div></div>' +
+      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_fork') + '</div><div class="v">' + forkVal + '</div></div>' +
+      '</div></div>' +
+      (links.length ? '<div class="detail-section"><h3>' + t('dashboard.detail_links') + '</h3><div class="detail-links">' + links.join('') + '</div></div>' : '') +
+      '<div class="detail-section"><h3>' + t('dashboard.detail_strengths') + '</h3>' + list(p.strengths, 'good') + '</div>' +
+      '<div class="detail-section"><h3>' + t('dashboard.detail_features') + '</h3>' + list(p.unique_features, 'feature') + '</div>' +
+      '<div class="detail-section"><h3>' + t('dashboard.detail_flags') + '</h3>' + list(p.red_flags, 'flag') + '</div>' +
+      '<div class="detail-section"><h3>' + t('dashboard.detail_content') + '</h3><p style="white-space:pre-wrap;font-size:0.85rem;color:#8b949e">' + esc(p.content || '') + '</p></div>' +
+      '<div class="detail-section">' +
+      '  <div style="font-size:0.8rem;color:#8b949e">' + tfmt('dashboard.detail_analyzed', { date: esc(p.analysis_date || dash) }) + '</div>' +
+      '  <div id="hist-' + p.topic_id + '" style="margin-top:8px"><div class="loading" style="padding:8px">' + t('dashboard.detail_history') + '</div></div>' +
+      '</div>';
     fetchJSON('/api/history/' + p.topic_id).then(h => {
       const el = document.getElementById('hist-' + p.topic_id);
       if (el) el.innerHTML = h.length
-        ? '<ul>' + h.map(x => `<li>${esc(x.analysis_date)} — <span class="score ${scoreClass(x.score)}">${x.score}</span> — ${esc(x.notes || '')}</li>`).join('') + '</ul>'
-        : '<li style="color:#8b949e">Aucun historique</li>';
+        ? '<ul>' + h.map(x => '<li>' + esc(x.analysis_date) + ' — <span class="score ' + scoreClass(x.score) + '">' + esc(x.score) + '</span>' + (x.notes ? ' — ' + esc(x.notes) : '') + '</li>').join('') + '</ul>'
+        : '<li style="color:#8b949e">' + t('dashboard.detail_no_history') + '</li>';
     }).catch(() => {});
   } catch (e) {
-    body.innerHTML = '<div class="empty">Erreur: ' + e.message + '</div>';
+    body.innerHTML = '<div class="empty">' + tfmt('dashboard.error_detail', { error: e.message }) + '</div>';
   }
 }
 
@@ -316,7 +388,32 @@ document.getElementById('search').addEventListener('input', function() {
   ));
 });
 
+async function populateLangSelect() {
+  const select = document.getElementById('lang-select');
+  let langs = [];
+  try {
+    langs = await fetchJSON('/api/i18n/languages');
+  } catch (e) {
+    langs = [{ code: '__DEFAULT_LANG__', name: 'Français' }, { code: 'en', name: 'English' }];
+  }
+  select.innerHTML = langs.map(l => '<option value="' + l.code + '"' + (l.code === LANG ? ' selected' : '') + '>' + esc(l.name) + '</option>').join('');
+}
+
+async function switchLanguage(lang) {
+  LANG = lang;
+  try {
+    localStorage.setItem('bt_lang', lang);
+  } catch (e) {}
+  await loadCatalog(lang);
+  applyI18n();
+  await loadStats();
+  renderTable(allProjects);
+}
+
 (async function init() {
+  await populateLangSelect();
+  await loadCatalog(LANG);
+  applyI18n();
   await loadStats();
   try {
     allProjects = await fetchJSON('/api/projects');
@@ -325,12 +422,27 @@ document.getElementById('search').addEventListener('input', function() {
     allProjects = [];
   }
   renderTable(allProjects);
+  const select = document.getElementById('lang-select');
+  if (select) select.addEventListener('change', () => switchLanguage(select.value));
 })();
 </script>
 </body>
 </html>
-"""
+""".replace("__DEFAULT_LANG__", DEFAULT_LANG)
     return HTMLResponse(html)
+
+
+@app.get("/api/i18n/languages")
+def api_i18n_languages() -> JSONResponse:
+    return JSONResponse(available_languages())
+
+
+@app.get("/api/i18n/{lang}")
+def api_i18n_catalog(lang: str) -> JSONResponse:
+    catalog = T.resolved_catalog(lang)
+    if not catalog:
+        raise HTTPException(status_code=404, detail=T.t("api.lang_not_found", lang=lang))
+    return JSONResponse(catalog)
 
 
 @app.get("/api/stats")
@@ -390,10 +502,10 @@ def api_projects() -> List[Dict[str, Any]]:
 
 
 @app.get("/api/projects/{topic_id}")
-def api_project_detail(topic_id: int) -> Dict[str, Any]:
+def api_project_detail(request: Request, topic_id: int) -> Dict[str, Any]:
     path = Path(DB_PATH)
     if not path.exists():
-        raise HTTPException(status_code=404, detail="Base de données introuvable")
+        raise HTTPException(status_code=404, detail=_t(request, "api.db_not_found"))
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.execute(
@@ -406,7 +518,7 @@ def api_project_detail(topic_id: int) -> Dict[str, Any]:
         )
         row = cur.fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="Projet introuvable")
+        raise HTTPException(status_code=404, detail=_t(request, "api.project_not_found"))
     return _row_to_project(row, include_lists=True)
 
 
@@ -428,4 +540,4 @@ def api_history(topic_id: int) -> List[Dict[str, Any]]:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
