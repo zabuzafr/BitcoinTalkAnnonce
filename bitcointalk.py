@@ -499,6 +499,8 @@ class UltimateBitcointalkAnalyzer:
                         continue
 
                     full_url = urljoin(self.base_url, topic_link)
+                    if urlsplit(full_url).netloc not in (urlsplit(self.base_url).netloc, "bitcointalk.org", "www.bitcointalk.org"):
+                        continue
                     await self.process_announcement(topic_id, full_url)
                     if topic_id not in analyzed_ids:
                         analyzed_ids.add(topic_id)
@@ -506,12 +508,6 @@ class UltimateBitcointalkAnalyzer:
 
         finally:
             await self.close_session()
-
-    def is_project_analyzed(self, topic_id: int) -> bool:
-        """Vérifie si un projet a déjà été analysé"""
-        with self._connect() as conn:
-            cur = conn.execute("SELECT 1 FROM projects WHERE topic_id = ?", (topic_id,))
-            return cur.fetchone() is not None
 
     def generate_report(self, report_path: str = 'crypto_analysis_report.json') -> Dict:
         """Génère un rapport des analyses"""

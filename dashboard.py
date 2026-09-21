@@ -15,17 +15,6 @@ DB_PATH = os.environ.get("BT_DB_PATH", str(Path(__file__).parent / "crypto_analy
 
 app = FastAPI(title="BitcoinTalk Dashboard", version="1.0")
 
-PROJECT_COLUMNS = [
-    "id", "topic_id", "title", "author", "post_date", "technical_score",
-    "innovation_score", "disruptiveness_score", "credibility_score",
-    "risk_score", "premine_percentage", "is_fork", "fork_base",
-    "mining_algorithm", "consensus_mechanism", "final_score",
-    "github_link", "whitepaper_link", "website_link", "analysis_date",
-    "last_updated", "is_promising"
-]
-
-JSON_COLUMNS = ("unique_features", "red_flags", "strengths")
-
 
 def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, timeout=10)
@@ -237,7 +226,7 @@ async function loadStats() {
       '<div class="stat-card"><div class="label">' + esc(c.label) + '</div><div class="value ' + c.cls + '"' + (c.small ? ' style="font-size:0.9rem"' : '') + '>' + esc(c.value) + '</div></div>'
     ).join('');
   } catch (e) {
-    document.getElementById('stats').innerHTML = '<div class="empty">' + tfmt('dashboard.error_stats', { error: e.message }) + '</div>';
+    document.getElementById('stats').innerHTML = '<div class="empty">' + tfmt('dashboard.error_stats', { error: esc(e.message) }) + '</div>';
   }
 }
 
@@ -322,7 +311,7 @@ async function openDetail(topicId) {
       ? '<ul>' + arr.map(x => '<li class="' + cls + '">' + esc(x) + '</li>').join('') + '</ul>'
       : '<li style="color:#8b949e">' + dash + '</li>';
     const bar = (label, val) => {
-      const v = val ?? 0;
+      const v = Math.max(0, Math.min(100, Number(val) || 0));
       const color = v >= 75 ? '#3fb950' : v >= 50 ? '#d29922' : '#f85149';
       return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:110px;font-size:0.8rem;color:#8b949e">' + label + '</div><div class="bar" style="flex:1"><div class="fill" style="width:' + v + '%;background:' + color + '"></div></div><div style="font-size:0.8rem;font-weight:700;width:30px;text-align:right">' + v + '</div></div>';
     };
@@ -367,7 +356,7 @@ async function openDetail(topicId) {
         : '<li style="color:#8b949e">' + t('dashboard.detail_no_history') + '</li>';
     }).catch(() => {});
   } catch (e) {
-    body.innerHTML = '<div class="empty">' + tfmt('dashboard.error_detail', { error: e.message }) + '</div>';
+    body.innerHTML = '<div class="empty">' + tfmt('dashboard.error_detail', { error: esc(e.message) }) + '</div>';
   }
 }
 
@@ -540,4 +529,4 @@ def api_history(topic_id: int) -> List[Dict[str, Any]]:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host=os.environ.get("BT_DASH_HOST", "127.0.0.1"), port=8080)
