@@ -13,7 +13,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 import ollama
@@ -480,7 +480,7 @@ class UltimateBitcointalkAnalyzer:
                 topic_links: List[str] = []
                 for link in soup.find_all('a', href=re.compile(r'topic=\d+\.msg\d+')):
                     href = link.get('href')
-                    if href and 'new' in link.get('class', []):
+                    if href:
                         topic_links.append(href)
                 self.scraped_count += len(topic_links)
 
@@ -498,11 +498,7 @@ class UltimateBitcointalkAnalyzer:
                     if topic_id in analyzed_ids:
                         continue
 
-                    path = urlsplit(topic_link).path
-                    if path.endswith('index.php') or 'index.php' in path:
-                        full_url = f"{self.base_url}/{topic_link}"
-                    else:
-                        full_url = topic_link
+                    full_url = urljoin(self.base_url, topic_link)
                     await self.process_announcement(topic_id, full_url)
                     if topic_id not in analyzed_ids:
                         analyzed_ids.add(topic_id)
