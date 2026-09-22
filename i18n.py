@@ -7,6 +7,7 @@ les chaînes avec formatage de paramètres.
 
 import json
 import os
+from copy import deepcopy
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -82,9 +83,11 @@ class Translations:
         return chain
 
     def resolved_catalog(self, lang: Optional[str] = None) -> Dict[str, Any]:
+        wanted = _norm(lang) or self.default_lang
         catalog: Dict[str, Any] = {}
-        for code in self.resolved_chain(lang):
-            deep_merge(catalog, self._catalogs.get(code, {}))
+        deep_merge(catalog, deepcopy(self._catalogs.get(self.default_lang, {})))
+        if wanted != self.default_lang and wanted in self._catalogs:
+            deep_merge(catalog, deepcopy(self._catalogs[wanted]))
         return catalog
 
     @staticmethod
