@@ -23,6 +23,7 @@ def _make_project(topic_id, score, **overrides):
         credibility_score=60,
         risk_score=10,
         final_score=score,
+        analysis_date="2026-01-01T00:00:00",
     )
     base.update(overrides)
     return bitcointalk.CryptoProject(**base)

@@ -2,6 +2,7 @@
   "_meta": {
     "name": "English"
   },
+  "title": "Crypto Project Watcher",
   "api": {
     "db_not_found": "Database not found",
     "project_not_found": "Project not found",
@@ -71,6 +72,8 @@
     "col_score": "Final score",
     "col_type": "Type",
     "col_status": "Status",
+    "col_activity": "Activity",
+    "col_actions": "Actions",
     "score_tech": "Tech",
     "score_inno": "Inno",
     "score_disp": "Disrupt.",
@@ -100,6 +103,29 @@
     "detail_analyzed": "Analyzed on {date}",
     "detail_history": "History…",
     "detail_no_history": "No history",
-    "list_empty": "—"
+    "list_empty": "—",
+    "badge_active": "Active",
+    "badge_inactive": "Inactive",
+    "ts_title": "Analysis activity",
+    "ts_week": "Week",
+    "ts_month": "Month",
+    "ts_year": "Year",
+    "algo_title": "Proof-of-work algorithms",
+    "algo_unknown": "Unknown",
+    "scan_title": "Scan for new projects",
+    "scan_start": "Start scan",
+    "scan_idle": "Ready",
+    "scan_running": "Running…",
+    "scan_done": "Done",
+    "scan_failed": "Failed",
+    "act_disable": "Disable",
+    "act_enable": "Enable",
+    "act_reanalyze": "Reanalyze",
+    "act_disabled": "Disabled",
+    "act_enabled": "Enabled",
+    "act_queued": "Analysis queued",
+    "error_busy": "Analysis already in progress",
+    "error_down": "LLM unavailable",
+    "inc_inactive": "Include inactive"
   }
 }

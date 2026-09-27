@@ -1,23 +1,45 @@
 """Tableau de bord Web pour les annonces cryptographiques analysées."""
 
+import asyncio
 import json
 import os
 import sqlite3
+import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+import bitcointalk
 from i18n import DEFAULT_LANG, T, available_languages
 
 DB_PATH = os.environ.get("BT_DB_PATH", str(Path(__file__).parent / "crypto_analysis.db"))
 
 app = FastAPI(title="BitcoinTalk Dashboard", version="1.0")
 
+_scan_lock = asyncio.Lock()
+_scan_init_lock = asyncio.Lock()
+_scan_state: Dict[str, Any] = {
+    "status": "idle",
+    "scan_id": None,
+    "pages_done": 0,
+    "pages_total": 0,
+    "started_at": None,
+    "finished_at": None,
+    "message": None,
+}
+_reanalyze_sem = asyncio.Semaphore(2)
+_reanalyzing: set = set()
+
 
 def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA journal_mode=wal")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def _decode_json(value: Any) -> Any:
@@ -52,6 +74,7 @@ def _row_to_project(row: sqlite3.Row, include_lists: bool = False) -> Dict[str, 
         "analysis_date": row["analysis_date"] or "",
         "last_updated": row["last_updated"] or "",
         "is_promising": bool(row["is_promising"]),
+        "is_active": bool(row["is_active"]),
     }
     if include_lists:
         data["unique_features"] = _decode_json(row["unique_features"])
@@ -66,6 +89,30 @@ def _t(request: Request, key: str, **kwargs: Any) -> str:
     return T.t(key, lang=lang, **kwargs)
 
 
+def _set_active(topic_id: int, active: bool) -> Optional[int]:
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT id FROM projects WHERE topic_id = ?", (topic_id,)).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE projects SET is_active = ?, last_updated = ? WHERE topic_id = ?",
+            (int(active), datetime.now().isoformat(), topic_id),
+        )
+        conn.commit()
+        return row["id"]
+    finally:
+        conn.close()
+
+
+async def _do_reanalyze(topic_id: int) -> None:
+    try:
+        async with _reanalyze_sem:
+            await asyncio.to_thread(bitcointalk.reanalyze_project, topic_id)
+    finally:
+        _reanalyzing.discard(topic_id)
+
+
 @app.get("/")
 def dashboard() -> HTMLResponse:
     html = """<!DOCTYPE html>
@@ -77,7 +124,7 @@ def dashboard() -> HTMLResponse:
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #e6edf3; }
-.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
 h1 { font-size: 1.8rem; margin-bottom: 20px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 h1 span { color: #f7931a; }
 .lang-select { padding: 6px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.85rem; font-weight: 400; }
@@ -135,6 +182,43 @@ tr:hover { background: #1c2128; }
 a.link { color: #58a6ff; text-decoration: none; font-size: 0.85rem; }
 a.link:hover { text-decoration: underline; }
 .detail-links { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px; }
+.panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }
+.panel h3 { margin: 0 0 10px; font-size: 14px; color: #e6edf3; }
+.ts-chart { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 8px; }
+.ts-bar { flex: 1; background: #58a6ff; border-radius: 3px 3px 0 0; min-height: 2px; position: relative; }
+.ts-bar span { position: absolute; top: -20px; left: 50%; transform: translateX(-50%); font-size: 11px; color: #e6edf3; opacity: 0; }
+.ts-bar:hover span { opacity: 1; }
+.ts-labels { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: #8b949e; }
+.algo-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
+.algo-row .name { width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.algo-bar { flex: 1; height: 10px; background: #21262d; border-radius: 5px; overflow: hidden; }
+.algo-bar .fill { height: 100%; background: #3fb950; }
+.algo-row .pct { width: 48px; text-align: right; color: #8b949e; }
+
+.badge-active { background: #1a3d2a; color: #3fb950; border: 1px solid #2ea043; padding: 1px 8px; border-radius: 10px; font-size: 11px; white-space: nowrap; }
+.badge-inactive { background: #21262d; color: #8b949e; border: 1px solid #484f58; padding: 1px 8px; border-radius: 10px; font-size: 11px; white-space: nowrap; }
+.badge-algo-unknown { background: #21262d; color: #8b949e; border: 1px dashed #484f58; padding: 1px 8px; border-radius: 10px; font-size: 11px; white-space: nowrap; }
+
+.btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 5px 12px; font-size: 13px; cursor: pointer; }
+.btn:hover { border-color: #58a6ff; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-warn { background: #3a2a00; border-color: #9e6a03; color: #d29922; }
+.btn-warn:hover { border-color: #d29922; }
+.btn-danger { background: #3a1015; border-color: #da3633; color: #f85149; }
+.btn-danger:hover { border-color: #f85149; }
+.action-row { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+
+.scan-progress { height: 10px; background: #21262d; border-radius: 5px; overflow: hidden; margin: 8px 0; }
+.scan-progress .fill { height: 100%; background: #58a6ff; width: 0%; transition: width 0.3s; }
+.scan-meta { font-size: 12px; color: #8b949e; }
+
+@media (max-width: 900px) {
+  .stats-grid { grid-template-columns: 1fr; }
+  .ts-chart { height: 80px; }
+  .action-row { flex-direction: column; }
+}
 </style>
 </head>
 <body>
@@ -143,6 +227,33 @@ a.link:hover { text-decoration: underline; }
   <label data-i18n="dashboard.lang_label">Langue</label> <select id="lang-select" class="lang-select"></select></h1>
   <div id="stats">
     <div class="loading" data-i18n="dashboard.loading">Chargement…</div>
+  </div>
+  <div class="stats-grid">
+    <div class="panel ts-panel">
+      <h3 data-i18n="dashboard.ts_title">Activité</h3>
+      <div class="ts-period" style="margin-bottom:8px;display:flex;gap:6px">
+        <button class="btn" data-ts="week" onclick="loadTimeseries('week')" data-i18n="dashboard.ts_week">7j</button>
+        <button class="btn" data-ts="month" onclick="loadTimeseries('month')" data-i18n="dashboard.ts_month">30j</button>
+        <button class="btn" data-ts="year" onclick="loadTimeseries('year')" data-i18n="dashboard.ts_year">12m</button>
+      </div>
+      <div id="ts-chart" class="ts-chart"></div>
+      <div id="ts-labels" class="ts-labels"></div>
+    </div>
+    <div class="panel algo-panel">
+      <h3 data-i18n="dashboard.algo_title">Algorithmes</h3>
+      <div id="algo-list"></div>
+    </div>
+    <div class="panel scan-panel">
+      <h3 data-i18n="dashboard.scan_title">Scan</h3>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input type="number" id="scan-pages" class="search" min="1" max="100" value="5" style="margin-bottom:0;width:70px">
+        <button class="btn btn-warn" id="btn-scan" onclick="startScan()" data-i18n="dashboard.scan_start">Lancer</button>
+      </div>
+      <div id="scan-section">
+        <div class="scan-progress"><div class="fill" id="scan-fill"></div></div>
+        <div class="scan-meta" id="scan-meta" data-i18n="dashboard.scan_idle">Inactif</div>
+      </div>
+    </div>
   </div>
   <input type="text" id="search" class="search" data-i18n-ph="dashboard.search_placeholder" placeholder="Rechercher par titre, auteur, algorithme…">
   <div id="table-wrap">
@@ -268,6 +379,8 @@ function renderTable(projects) {
       '<td><span class="score ' + scoreClass(p.final_score) + '">' + esc(p.final_score != null ? p.final_score : '—') + '</span></td>' +
       '<td>' + type + '</td>' +
       '<td>' + status + '</td>' +
+      '<td>' + renderActivityBadge(p) + '</td>' +
+      '<td>' + actButtons(p) + '</td>' +
       '</tr>';
   }).join('');
   wrap.innerHTML = '<table><thead><tr>' +
@@ -277,6 +390,8 @@ function renderTable(projects) {
     '<th data-key="final_score" class="score-col">' + t('dashboard.col_score') + '</th>' +
     '<th>' + t('dashboard.col_type') + '</th>' +
     '<th>' + t('dashboard.col_status') + '</th>' +
+    '<th>' + t('dashboard.col_activity') + '</th>' +
+    '<th>' + t('dashboard.col_actions') + '</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table>';
   document.querySelectorAll('th[data-key]').forEach(th => {
     th.addEventListener('click', () => sortTable(th.dataset.key, th));
@@ -345,10 +460,11 @@ async function openDetail(topicId) {
       '<div class="detail-section"><h3>' + t('dashboard.detail_features') + '</h3>' + list(p.unique_features, 'feature') + '</div>' +
       '<div class="detail-section"><h3>' + t('dashboard.detail_flags') + '</h3>' + list(p.red_flags, 'flag') + '</div>' +
       '<div class="detail-section"><h3>' + t('dashboard.detail_content') + '</h3><p style="white-space:pre-wrap;font-size:0.85rem;color:#8b949e">' + esc(p.content || '') + '</p></div>' +
-      '<div class="detail-section">' +
-      '  <div style="font-size:0.8rem;color:#8b949e">' + tfmt('dashboard.detail_analyzed', { date: esc(p.analysis_date || dash) }) + '</div>' +
-      '  <div id="hist-' + p.topic_id + '" style="margin-top:8px"><div class="loading" style="padding:8px">' + t('dashboard.detail_history') + '</div></div>' +
-      '</div>';
+       '<div class="detail-section">' +
+       '  <div style="font-size:0.8rem;color:#8b949e">' + tfmt('dashboard.detail_analyzed', { date: esc(p.analysis_date || dash) }) + '</div>' +
+       '  <div id="hist-' + p.topic_id + '" style="margin-top:8px"><div class="loading" style="padding:8px">' + t('dashboard.detail_history') + '</div></div>' +
+       '</div>' +
+       '<div class="detail-section">' + actButtons(p) + '</div>';
     fetchJSON('/api/history/' + p.topic_id).then(h => {
       const el = document.getElementById('hist-' + p.topic_id);
       if (el) el.innerHTML = h.length
@@ -399,6 +515,157 @@ async function switchLanguage(lang) {
   renderTable(allProjects);
 }
 
+function renderActivityBadge(p) {
+  if (p.is_active === false) return '<span class="badge-inactive">' + t('dashboard.badge_inactive') + '</span>';
+  return '<span class="badge-active">' + t('dashboard.badge_active') + '</span>';
+}
+
+function actButtons(p) {
+  const disabled = p.is_active === false;
+  const busy = p._busy === true;
+  const actDis = disabled ? '' : '<button class="btn" data-topic="' + p.topic_id + '" data-act="disable" ' + (busy ? 'disabled ' : '') + 'onclick="event.stopPropagation();actCall(' + p.topic_id + ',&#39;disable&#39;)">' + t('dashboard.act_disable') + '</button>';
+  const actEn = disabled ? '<button class="btn" data-topic="' + p.topic_id + '" data-act="enable" ' + (busy ? 'disabled ' : '') + 'onclick="event.stopPropagation();actCall(' + p.topic_id + ',&#39;enable&#39;)">' + t('dashboard.act_enable') + '</button>' : '';
+  const actAn = busy ? '' : '<button class="btn" data-topic="' + p.topic_id + '" data-act="reanalyze" onclick="event.stopPropagation();actCall(' + p.topic_id + ',&#39;reanalyze&#39;)">' + t('dashboard.act_reanalyze') + '</button>';
+  return '<div class="action-row">' + actDis + actEn + actAn + '</div>';
+}
+
+function patchLocal(topicId, patch) {
+  const idx = allProjects.findIndex(p => p.topic_id === topicId);
+  if (idx >= 0) Object.assign(allProjects[idx], patch);
+}
+
+async function actCall(topicId, action) {
+  patchLocal(topicId, { _busy: true });
+  renderTable(allProjects);
+  try {
+    const path = action === 'reanalyze'
+      ? '/api/projects/' + topicId + '/analyze'
+      : '/api/projects/' + topicId + '/' + action;
+    const r = await fetchJSON(path, { method: 'POST' });
+    if (action === 'reanalyze') {
+      patchLocal(topicId, { _busy: false });
+      toast(t('dashboard.act_queued'));
+    } else {
+      const isActive = action === 'enable';
+      patchLocal(topicId, { is_active: isActive, _busy: false });
+      toast(t(isActive ? 'dashboard.act_enabled' : 'dashboard.act_disabled'));
+    }
+    renderTable(allProjects);
+    loadStats();
+    const ov = document.getElementById('detail-overlay');
+    if (ov && ov.classList.contains('open')) openDetail(topicId);
+  } catch (e) {
+    patchLocal(topicId, { _busy: false });
+    renderTable(allProjects);
+    if (String(e.message).includes('409')) toast(t('dashboard.error_busy'), true);
+    else if (String(e.message).includes('503')) toast(t('dashboard.error_down'), true);
+    else toast(e.message, true);
+  }
+}
+
+function toast(msg, isError) {
+  let el = document.getElementById('toast');
+  if (!el) { el = document.createElement('div'); el.id = 'toast'; document.body.appendChild(el); }
+  el.textContent = msg;
+  el.style.display = 'block';
+  el.style.color = isError ? '#f85149' : '#3fb950';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+function renderScan(state) {
+  const fill = document.getElementById('scan-fill');
+  const meta = document.getElementById('scan-meta');
+  if (!fill) return;
+  if (state.status === 'running') {
+    const pct = state.pages_done != null && state.total_pages != null
+      ? Math.round((state.pages_done / state.total_pages) * 100) : 0;
+    fill.style.width = pct + '%';
+    meta.textContent = t('dashboard.scan_running') + ' ' + t('dashboard.scan_pages').replace('{done}', state.pages_done ?? '?').replace('{total}', state.total_pages ?? '?');
+  } else if (state.status === 'done') {
+    fill.style.width = '100%';
+    meta.textContent = t('dashboard.scan_done') + ' — ' + t('dashboard.scan_found').replace('{n}', state.new_projects ?? 0);
+  } else if (state.status === 'failed') {
+    fill.style.width = '0%';
+    meta.textContent = t('dashboard.scan_failed') + (state.error ? ' — ' + state.error : '');
+  } else {
+    fill.style.width = '0%';
+    meta.textContent = t('dashboard.scan_idle');
+  }
+}
+
+async function pollScan(scanId) {
+  const tick = async () => {
+    let state;
+    try { state = await fetchJSON('/api/scan/status'); } catch (e) { return; }
+    renderScan(state);
+    if (state.status === 'running') { pollScan._timer = setTimeout(tick, 2000); }
+    else if (state.status === 'done') { await loadTimeseries(currentTsPeriod); loadAlgo(currentAlgoTop); loadStats(); }
+  };
+  await tick();
+}
+
+async function startScan() {
+  const btn = document.getElementById('btn-scan');
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+  try {
+    const r = await fetchJSON('/api/scan', { method: 'POST' });
+    pollScan(r.scan_id);
+  } catch (e) {
+    if (String(e.message).includes('202') || String(e.message).includes('409')) {
+      const state = await fetchJSON('/api/scan/status').catch(() => null);
+      if (state) renderScan(state);
+    } else {
+      toast(t('dashboard.scan_failed') + ' — ' + e.message, true);
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+  }
+}
+
+let currentTsPeriod = 'week';
+let currentAlgoTop = 10;
+
+async function loadTimeseries(period) {
+  currentTsPeriod = period;
+  const el = document.getElementById('ts-chart');
+  const labels = document.getElementById('ts-labels');
+  if (!el) return;
+  try {
+    const data = await fetchJSON('/api/stats/timeseries?period=' + period + '&include_inactive=0');
+    const buckets = data.buckets || [];
+    const vals = buckets.map(b => b.count || 0);
+    const max = Math.max(...vals, 1);
+    el.innerHTML = buckets.map((b, i) =>
+      '<div class="ts-bar-wrap"><div class="ts-bar" style="height:' + Math.round((vals[i] / max) * 100) + '%" title="' + esc(b.label) + ': ' + vals[i] + '"></div></div>'
+    ).join('');
+    if (labels) labels.innerHTML = buckets.map(b => '<span class="ts-label">' + esc(b.label) + '</span>').join('');
+  } catch (e) {
+    el.innerHTML = '<div class="empty" style="padding:12px">' + esc(e.message) + '</div>';
+  }
+}
+
+async function loadAlgo(top) {
+  currentAlgoTop = top;
+  const el = document.getElementById('algo-list');
+  if (!el) return;
+  try {
+    const data = await fetchJSON('/api/stats/by_algorithm?top=' + top + '&include_inactive=0');
+    const total = data.total || 0;
+    el.innerHTML = '<div style="font-size:0.8rem;color:#8b949e;margin-bottom:8px">' + t('dashboard.algo_total').replace('{n}', total) + '</div>' +
+      (data.algorithms || []).map(a => {
+        const label = a.algorithm === 'unknown' || !a.algorithm
+          ? t('dashboard.algo_unknown') : esc(a.algorithm);
+        const pct = a.pct != null ? a.pct : (total ? Math.round((a.count / total) * 100) : 0);
+        return '<div class="algo-row"><span class="algo-label">' + label + '</span>' +
+          '<div class="algo-bar"><div class="fill" style="width:' + pct + '%"></div></div>' +
+          '<span class="algo-count">' + a.count + '</span></div>';
+      }).join('');
+  } catch (e) {
+    el.innerHTML = '<div class="empty" style="padding:12px">' + esc(e.message) + '</div>';
+  }
+}
+
 (async function init() {
   await populateLangSelect();
   await loadCatalog(LANG);
@@ -411,6 +678,8 @@ async function switchLanguage(lang) {
     allProjects = [];
   }
   renderTable(allProjects);
+  await loadTimeseries('month');
+  await loadAlgo(10);
   const select = document.getElementById('lang-select');
   if (select) select.addEventListener('change', () => switchLanguage(select.value));
 })();
@@ -441,6 +710,8 @@ def api_stats() -> JSONResponse:
         return JSONResponse({
             "db_exists": False,
             "total_projects": 0,
+            "active_count": 0,
+            "inactive_count": 0,
             "promising_count": 0,
             "fork_count": 0,
             "avg_final_score": None,
@@ -453,6 +724,7 @@ def api_stats() -> JSONResponse:
             SELECT COUNT(*) AS total,
                    COALESCE(SUM(is_promising), 0) AS promising,
                    COALESCE(SUM(CASE WHEN is_fork THEN 1 ELSE 0 END), 0) AS forks,
+                   COALESCE(SUM(CASE WHEN is_active THEN 1 ELSE 0 END), 0) AS active,
                    AVG(final_score) AS avg_score,
                    MAX(final_score) AS max_score,
                    MIN(final_score) AS min_score,
@@ -460,32 +732,49 @@ def api_stats() -> JSONResponse:
             FROM projects
         """)
         row = cur.fetchone()
+    total = row[0] or 0
+    active = row[3] or 0
     return JSONResponse({
         "db_exists": True,
-        "total_projects": row[0] or 0,
+        "total_projects": total,
+        "active_count": active,
+        "inactive_count": total - active,
         "promising_count": row[1] or 0,
         "fork_count": row[2] or 0,
-        "avg_final_score": round(row[3], 1) if row[3] is not None else None,
-        "max_final_score": row[4],
-        "min_final_score": row[5],
-        "last_analysis": row[6],
+        "avg_final_score": round(row[4], 1) if row[4] is not None else None,
+        "max_final_score": row[5],
+        "min_final_score": row[6],
+        "last_analysis": row[7],
     })
 
 
 @app.get("/api/projects")
-def api_projects() -> List[Dict[str, Any]]:
+def api_projects(
+    include_inactive: int = 0,
+    q: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     path = Path(DB_PATH)
     if not path.exists():
         return []
+    clauses: List[str] = []
+    params: List[Any] = []
+    if not include_inactive:
+        clauses.append("is_active = 1")
+    if q:
+        clauses.append("(title LIKE ? OR author LIKE ?)")
+        like = f"%{q}%"
+        params.extend([like, like])
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = (
+        "SELECT topic_id, title, author, post_date, technical_score, innovation_score, "
+        "disruptiveness_score, credibility_score, risk_score, premine_percentage, is_fork, "
+        "fork_base, mining_algorithm, consensus_mechanism, final_score, github_link, "
+        "whitepaper_link, website_link, analysis_date, last_updated, is_promising, is_active "
+        f"FROM projects{where} ORDER BY final_score DESC NULLS LAST, analysis_date DESC"
+    )
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
-        cur = conn.execute(
-            "SELECT topic_id, title, author, post_date, technical_score, innovation_score, "
-            "disruptiveness_score, credibility_score, risk_score, premine_percentage, is_fork, "
-            "fork_base, mining_algorithm, consensus_mechanism, final_score, github_link, "
-            "whitepaper_link, website_link, analysis_date, last_updated, is_promising "
-            "FROM projects ORDER BY final_score DESC NULLS LAST, analysis_date DESC"
-        )
+        cur = conn.execute(sql, params)
         rows = cur.fetchall()
     return [_row_to_project(r) for r in rows]
 
@@ -502,7 +791,7 @@ def api_project_detail(request: Request, topic_id: int) -> Dict[str, Any]:
             "disruptiveness_score, credibility_score, risk_score, premine_percentage, is_fork, "
             "fork_base, mining_algorithm, consensus_mechanism, unique_features, red_flags, "
             "strengths, final_score, github_link, whitepaper_link, website_link, analysis_date, "
-            "last_updated, is_promising FROM projects WHERE topic_id = ?",
+            "last_updated, is_promising, is_active FROM projects WHERE topic_id = ?",
             (topic_id,)
         )
         row = cur.fetchone()
@@ -512,21 +801,199 @@ def api_project_detail(request: Request, topic_id: int) -> Dict[str, Any]:
 
 
 @app.get("/api/history/{topic_id}")
-def api_history(topic_id: int) -> List[Dict[str, Any]]:
+def api_history(request: Request, topic_id: int) -> Dict[str, Any]:
     if not Path(DB_PATH).exists():
-        return []
+        raise HTTPException(status_code=404, detail=_t(request, "api.project_not_found"))
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT topic_id FROM projects WHERE topic_id = ?", (topic_id,)
+        )
+        exists = cur.fetchone()
+        if exists is None:
+            raise HTTPException(status_code=404, detail=_t(request, "api.project_not_found"))
         cur = conn.execute(
             "SELECT topic_id, analysis_date, score, notes FROM analysis_history "
             "WHERE topic_id = ? ORDER BY analysis_date DESC",
             (topic_id,)
         )
         rows = cur.fetchall()
-    return [dict(r) for r in rows]
+    return {"topic_id": topic_id, "history": [dict(r) for r in rows]}
+
+
+@app.post("/api/projects/{topic_id}/disable")
+def api_project_disable(request: Request, topic_id: int) -> Dict[str, Any]:
+    path = Path(DB_PATH)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=_t(request, "api.db_not_found"))
+    result = _set_active(topic_id, False)
+    if result is None:
+        raise HTTPException(status_code=404, detail=_t(request, "api.project_not_found"))
+    return {"id": result, "status": "disabled"}
+
+
+@app.post("/api/projects/{topic_id}/enable")
+def api_project_enable(request: Request, topic_id: int) -> Dict[str, Any]:
+    path = Path(DB_PATH)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=_t(request, "api.db_not_found"))
+    result = _set_active(topic_id, True)
+    if result is None:
+        raise HTTPException(status_code=404, detail=_t(request, "api.project_not_found"))
+    return {"id": result, "status": "enabled"}
+
+
+def _ollama_available() -> bool:
+    try:
+        import ollama
+
+        ollama.list()
+        return True
+    except Exception:
+        return False
+
+
+@app.post("/api/projects/{topic_id}/analyze")
+async def api_project_analyze(request: Request, topic_id: int) -> Dict[str, Any]:
+    path = Path(DB_PATH)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=_t(request, "api.db_not_found"))
+    with _connect() as conn:
+        row = conn.execute("SELECT topic_id FROM projects WHERE topic_id = ?", (topic_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=_t(request, "api.project_not_found"))
+    if topic_id in _reanalyzing:
+        raise HTTPException(status_code=409, detail="analyzing")
+    if not _ollama_available():
+        raise HTTPException(status_code=503, detail="ollama_unavailable")
+    asyncio.create_task(_do_reanalyze(topic_id))
+    return {"topic_id": topic_id, "status": "queued"}
+
+
+@app.get("/api/stats/timeseries")
+def api_stats_timeseries(
+    period: str = "week",
+    include_inactive: int = 0,
+) -> Dict[str, Any]:
+    if period not in ("week", "month", "year"):
+        raise HTTPException(status_code=422, detail="period must be week, month or year")
+    if include_inactive not in (0, 1):
+        raise HTTPException(status_code=422, detail="include_inactive must be 0 or 1")
+    row_fmt = {"week": "%Y-W%W", "month": "%Y-%m", "year": "%Y"}[period]
+    sql = "SELECT strftime(?, analysis_date) AS bucket, COUNT(*) AS n FROM projects"
+    params: List[Any] = [row_fmt]
+    if not include_inactive:
+        sql += " WHERE is_active = 1"
+    sql += " GROUP BY bucket ORDER BY bucket DESC"
+    if not Path(DB_PATH).exists():
+        data: Dict[str, int] = {}
+    else:
+        with _connect() as conn:
+            cur = conn.execute(sql, params)
+            data = {r["bucket"]: r["n"] for r in cur.fetchall()}
+    anchor = datetime.now()
+    if Path(DB_PATH).exists():
+        sql_anchor = "SELECT MAX(analysis_date) AS max_date FROM projects"
+        if not include_inactive:
+            sql_anchor += " WHERE is_active = 1"
+        with _connect() as conn:
+            anchor_row = conn.execute(sql_anchor).fetchone()
+        if anchor_row and anchor_row["max_date"]:
+            try:
+                anchor = datetime.fromisoformat(anchor_row["max_date"])
+            except ValueError:
+                anchor = datetime.now()
+    if period == "year":
+        keys = [str(anchor.year - i) for i in range(11, -1, -1)]
+    elif period == "month":
+        keys: List[str] = []
+        y, m = anchor.year, anchor.month
+        for i in range(11, -1, -1):
+            y, m = divmod(y * 12 + m - 1 - i, 12)
+            m += 1
+            keys.append(f"{y}-{m:02d}")
+    else:
+        keys = [(anchor - timedelta(weeks=i)).strftime("%Y-W%W") for i in range(11, -1, -1)]
+    buckets = [{"label": k, "count": data.get(k, 0)} for k in reversed(keys)]
+    return {"period": period, "buckets": buckets}
+
+
+@app.get("/api/stats/by_algorithm")
+def api_stats_by_algorithm(top: int = 10, include_inactive: int = 0) -> Dict[str, Any]:
+    if include_inactive not in (0, 1):
+        raise HTTPException(status_code=422, detail="include_inactive must be 0 or 1")
+    top = max(1, min(50, int(top)))
+    sql = "SELECT mining_algorithm, COUNT(*) AS n FROM projects"
+    if not include_inactive:
+        sql += " WHERE is_active = 1"
+    sql += " GROUP BY mining_algorithm"
+    if Path(DB_PATH).exists():
+        with _connect() as conn:
+            rows = conn.execute(sql).fetchall()
+    else:
+        rows = []
+    counts: Dict[str, int] = {}
+    for r in rows:
+        key = (r[0] or "").strip() or "unknown"
+        counts[key] = counts.get(key, 0) + r[1]
+    total = sum(counts.values())
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
+    rows_out = [
+        {
+            "algorithm": name,
+            "count": n,
+            "pct": round(n * 100.0 / total, 1) if total else 0.0,
+        }
+        for name, n in ordered
+    ]
+    return {"total": total, "algorithms": rows_out}
+
+
+@app.post("/api/scan")
+async def api_scan_scan(request: Request, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    body = body or {}
+    section_id = int(body.get("section_id", 64))
+    pages = int(body.get("pages", 5))
+    async with _scan_init_lock:
+        if _scan_state["status"] == "running":
+            return {"scan_id": _scan_state["scan_id"], "status": "running"}
+        scan_id = uuid.uuid4().hex
+        _scan_state.update(
+            status="running",
+            scan_id=scan_id,
+            pages_done=0,
+            pages_total=pages,
+            started_at=datetime.now().isoformat(),
+            finished_at=None,
+            message=None,
+        )
+    asyncio.create_task(_run_scan(scan_id, section_id, pages))
+    return {"scan_id": scan_id, "status": "running"}
+
+
+@app.get("/api/scan/status")
+def api_scan_status() -> Dict[str, Any]:
+    return dict(_scan_state)
+
+
+async def _run_scan(scan_id: str, section_id: int, pages: int) -> None:
+    async with _scan_lock:
+        try:
+            analyzer = bitcointalk.UltimateBitcointalkAnalyzer(db_path=DB_PATH, timeout=30)
+            async with _scan_init_lock:
+                if _scan_state["scan_id"] == scan_id:
+                    _scan_state["message"] = "scanning"
+            await analyzer.scan_bitcointalk_section(section_id, pages)
+            async with _scan_init_lock:
+                if _scan_state["scan_id"] == scan_id:
+                    _scan_state.update(status="done", pages_done=pages, finished_at=datetime.now().isoformat())
+        except Exception as exc:
+            async with _scan_init_lock:
+                if _scan_state["scan_id"] == scan_id:
+                    _scan_state.update(status="error", message=str(exc), finished_at=datetime.now().isoformat())
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=os.environ.get("BT_DASH_HOST", "127.0.0.1"), port=8080)
+    uvicorn.run(app, host=os.environ.get("BT_DASH_HOST", "0.0.0.0"), port=8080)

@@ -2,6 +2,7 @@
   "_meta": {
     "name": "Français"
   },
+  "title": "Veille de projets crypto",
   "api": {
     "db_not_found": "Base de données introuvable",
     "project_not_found": "Projet introuvable",
@@ -71,6 +72,8 @@
     "col_score": "Score final",
     "col_type": "Type",
     "col_status": "Statut",
+    "col_activity": "Activité",
+    "col_actions": "Actions",
     "score_tech": "Tech",
     "score_inno": "Inno",
     "score_disp": "Disrupt.",
@@ -100,6 +103,29 @@
     "detail_analyzed": "Analyse du {date}",
     "detail_history": "Historique…",
     "detail_no_history": "Aucun historique",
-    "list_empty": "—"
+    "list_empty": "—",
+    "badge_active": "Actif",
+    "badge_inactive": "Inactif",
+    "ts_title": "Activité d'analyse",
+    "ts_week": "Semaine",
+    "ts_month": "Mois",
+    "ts_year": "Année",
+    "algo_title": "Algorithmes de preuve de travail",
+    "algo_unknown": "Inconnu",
+    "scan_title": "Scan de nouveaux projets",
+    "scan_start": "Lancer un scan",
+    "scan_idle": "Prêt",
+    "scan_running": "En cours…",
+    "scan_done": "Terminé",
+    "scan_failed": "Échoué",
+    "act_disable": "Désactiver",
+    "act_enable": "Activer",
+    "act_reanalyze": "Réanalyser",
+    "act_disabled": "Désactivé",
+    "act_enabled": "Activé",
+    "act_queued": "Analyse planifiée",
+    "error_busy": "Analyse déjà en cours",
+    "error_down": "LLM indisponible",
+    "inc_inactive": "Inclure les inactifs"
   }
 }

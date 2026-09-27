@@ -99,3 +99,33 @@ class TestTranslations:
     def test_custom_dir(self, tmp_path):
         tr = Translations(translations_dir=tmp_path)
         assert tr.resolve("zz") == "fr"
+
+
+class TestV2Parity:
+    def _catalog(self, lang):
+        return T._catalogs[lang]["dashboard"]
+
+    def test_dashboard_key_sets_equal(self):
+        assert set(self._catalog("en")) == set(self._catalog("fr"))
+
+    def test_dashboard_key_count(self):
+        assert len(self._catalog("en")) == 75
+        assert len(self._catalog("fr")) == 75
+
+    def test_v2_keys_present_both_locales(self):
+        v2 = [
+            "stat_total", "stat_promising", "stat_avg", "stat_forks",
+            "stat_max", "stat_last", "ts_title", "ts_week", "ts_month",
+            "ts_year", "algo_title", "algo_unknown",
+            "scan_title", "scan_start", "scan_idle", "scan_running",
+            "scan_done", "scan_failed",
+        ]
+        for key in v2:
+            assert key in self._catalog("en"), key
+            assert key in self._catalog("fr"), key
+
+    def test_v2_values_nonempty(self):
+        for lang in ("en", "fr"):
+            for key in self._catalog(lang):
+                assert isinstance(self._catalog(lang)[key], str)
+                assert self._catalog(lang)[key].strip()

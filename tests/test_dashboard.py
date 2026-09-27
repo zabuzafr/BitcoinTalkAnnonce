@@ -131,8 +131,19 @@ class TestApiHistory:
             response = client.get("/api/history/401")
             assert response.status_code == 200
             data = response.json()
-            assert isinstance(data, list)
-            assert len(data) >= 1
+            assert data["topic_id"] == 401
+            assert isinstance(data["history"], list)
+            assert len(data["history"]) >= 1
+        finally:
+            _restore(original)
+
+    def test_unknown_topic(self, tmp_path):
+        db = tmp_path / "hist404.db"
+        _seed(db, [])
+        client, original = _client(db)
+        try:
+            response = client.get("/api/history/999")
+            assert response.status_code == 404
         finally:
             _restore(original)
 

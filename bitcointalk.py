@@ -60,6 +60,19 @@ class CryptoProject:
     analysis_date: str = ""
 
 
+def _ensure_active_column(db_path: str) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(projects)")]
+        if "id" in cols and "is_active" not in cols:
+            conn.execute(
+                "ALTER TABLE projects ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
 class UltimateBitcointalkAnalyzer:
     def __init__(
         self,
@@ -87,7 +100,10 @@ class UltimateBitcointalkAnalyzer:
         self.init_database()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path, timeout=10)
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.execute("PRAGMA journal_mode=wal")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
 
     def init_database(self) -> None:
         """Initialise la base de données SQLite complète"""
@@ -119,6 +135,7 @@ class UltimateBitcointalkAnalyzer:
                 website_link TEXT,
                 analysis_date TEXT,
                 last_updated TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
                 is_promising BOOLEAN
             );
 
@@ -130,7 +147,15 @@ class UltimateBitcointalkAnalyzer:
                 notes TEXT,
                 FOREIGN KEY (topic_id) REFERENCES projects (topic_id)
             );
+
+            CREATE INDEX IF NOT EXISTS idx_projects_analysis_date ON projects(analysis_date);
+            CREATE INDEX IF NOT EXISTS idx_projects_mining_algorithm ON projects(mining_algorithm);
+            CREATE INDEX IF NOT EXISTS idx_projects_is_active ON projects(is_active);
             ''')
+        _ensure_active_column(self.db_path)
+        with self._connect() as conn:
+            conn.execute("PRAGMA user_version=1")
+            conn.commit()
         logger.info(T.t("console.logger_db_init"))
 
     async def init_session(self) -> None:
@@ -429,14 +454,20 @@ class UltimateBitcointalkAnalyzer:
         """Sauvegarde un projet en base de données"""
         try:
             with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT is_active FROM projects WHERE topic_id = ?",
+                    (project.topic_id,)
+                ).fetchone()
+                is_active = int(row[0]) if row and row[0] is not None else 1
+
                 conn.execute('''
                 INSERT OR REPLACE INTO projects
                 (topic_id, title, author, post_date, content, technical_score, innovation_score,
                  disruptiveness_score, credibility_score, risk_score, premine_percentage, is_fork,
                  fork_base, mining_algorithm, consensus_mechanism, unique_features, red_flags,
                  strengths, final_score, github_link, whitepaper_link, website_link, analysis_date,
-                 last_updated, is_promising)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 last_updated, is_promising, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     project.topic_id, project.title, project.author, project.post_date,
                     project.content, project.technical_score, project.innovation_score,
@@ -448,7 +479,7 @@ class UltimateBitcointalkAnalyzer:
                     json.dumps(project.strengths, ensure_ascii=False, allow_nan=False),
                     project.final_score, project.github_link,
                     project.whitepaper_link, project.website_link, project.analysis_date,
-                    datetime.now().isoformat(), project.final_score >= 75
+                    datetime.now().isoformat(), project.final_score >= 75, is_active
                 ))
                 conn.execute(
                     "INSERT INTO analysis_history (topic_id, analysis_date, score, notes) VALUES (?, ?, ?, ?)",
@@ -547,6 +578,18 @@ class UltimateBitcointalkAnalyzer:
             json.dump(report, f, indent=2, ensure_ascii=False, allow_nan=False)
 
         return report
+
+
+def reanalyze_project(topic_id: int) -> None:
+    """Re-analyse un projet existant (synchronise, à appeler via asyncio.to_thread)"""
+    analyzer = UltimateBitcointalkAnalyzer()
+    url = f"{analyzer.base_url}/threads/{topic_id}"
+    logger.info(T.t("console.reanalyze_start", topic_id=topic_id, url=url))
+    try:
+        asyncio.run(analyzer.process_announcement(topic_id, url))
+    except Exception:
+        raise
+    logger.info(T.t("console.reanalyze_done", topic_id=topic_id))
 
 
 def parse_args() -> argparse.Namespace:
