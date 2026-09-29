@@ -56,6 +56,11 @@ class CryptoProject:
     unique_features: List[str] = field(default_factory=list)
     red_flags: List[str] = field(default_factory=list)
     strengths: List[str] = field(default_factory=list)
+    quality_level: str = ""
+    innovation_level: str = ""
+    quantum_risk_score: float = 0.0
+    mining_type: str = ""
+    quality_note: str = ""
     final_score: int = 0
     analysis_date: str = ""
 
@@ -64,11 +69,38 @@ def _ensure_active_column(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(projects)")]
-        if "id" in cols and "is_active" not in cols:
+        if "is_active" not in cols:
             conn.execute(
                 "ALTER TABLE projects ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
             )
             conn.commit()
+        new_cols = {
+            "quality_level": "TEXT NOT NULL DEFAULT ''",
+            "innovation_level": "TEXT NOT NULL DEFAULT ''",
+            "quantum_risk_score": "REAL NOT NULL DEFAULT 0.0",
+            "mining_type": "TEXT NOT NULL DEFAULT ''",
+            "quality_note": "TEXT NOT NULL DEFAULT ''",
+            "github_stars": "INTEGER NOT NULL DEFAULT 0",
+            "discord_members": "INTEGER NOT NULL DEFAULT 0",
+            "telegram_members": "INTEGER NOT NULL DEFAULT 0",
+            "hashrate_str": "TEXT NOT NULL DEFAULT ''",
+            "mining_status": "TEXT NOT NULL DEFAULT ''",
+            "token_distribution": "TEXT NOT NULL DEFAULT ''",
+            "team_allocation": "TEXT NOT NULL DEFAULT ''",
+            "vesting_period": "TEXT NOT NULL DEFAULT ''",
+            "inflation_model": "TEXT NOT NULL DEFAULT ''",
+            "burn_mechanisms": "TEXT NOT NULL DEFAULT ''",
+            "utility_description": "TEXT NOT NULL DEFAULT ''",
+            "tokenomics_risks": "TEXT NOT NULL DEFAULT ''",
+            "tokenomics_score": "REAL NOT NULL DEFAULT 0.0",
+        }
+        for col_name, col_def in new_cols.items():
+            if col_name not in cols:
+                try:
+                    conn.execute(f"ALTER TABLE projects ADD COLUMN {col_name} {col_def}")
+                    conn.commit()
+                except Exception:
+                    pass
     finally:
         conn.close()
 
@@ -300,6 +332,167 @@ class UltimateBitcointalkAnalyzer:
             return float(m.group(1).replace(',', '.'))
         except ValueError:
             return 0.0
+
+    async def fetch_github_stats(self, github_url: str) -> Dict[str, Any]:
+        """Récupère les statistiques GitHub d'un dépôt"""
+        m = re.search(r'github\.com/([^/]+)/([^/]+)', github_url)
+        if not m or not github_url.startswith('http'):
+            return {'stars': 0, 'forks': 0, 'open_issues': 0, 'lang': '', 'updated_at': ''}
+        owner, repo = m.group(1), m.group(2)
+        api_url = f"https://api.github.com/repos/{owner}/{repo}"
+        html = await self.fetch_with_retry(api_url)
+        if not html:
+            return {'stars': 0, 'forks': 0, 'open_issues': 0, 'lang': '', 'updated_at': ''}
+        try:
+            data = json.loads(html)
+            stars = int(data.get('stargazers_count') or 0)
+            forks = int(data.get('forks_count') or 0)
+            issues = int(data.get('open_issues_count') or 0)
+            lang = (data.get('language') or '').strip()
+            updated = data.get('updated_at', '')
+            return {'stars': stars, 'forks': forks, 'open_issues': issues, 'lang': lang, 'updated_at': updated}
+        except Exception:
+            return {'stars': 0, 'forks': 0, 'open_issues': 0, 'lang': '', 'updated_at': ''}
+
+    async def fetch_miningpool_stats(self, algorithm: str) -> Dict[str, Any]:
+        """Récupère les stats de minage depuis MiningPoolStats"""
+        algo_lower = (algorithm or '').lower()
+        if not algo_lower or algo_lower in ('unknown', 'null'):
+            return {'status': '', 'hashrate': '', 'active_pools': 0, 'pool_list': []}
+        api_url = f"https://www.miningpoolstats.io/api/v1/algorithm/{algo_lower}/stats"
+        html = await self.fetch_with_retry(api_url)
+        if not html:
+            return {'status': '', 'hashrate': '', 'active_pools': 0, 'pool_list': []}
+        try:
+            data = json.loads(html)
+            if isinstance(data, dict):
+                status = data.get('status', '').strip()
+                hashrate = (data.get('network_hashrate') or '').strip()
+                pools = data.get('pools', [])
+                if isinstance(pools, list):
+                    pool_list = [p.get('name', '') for p in pools if p.get('name')]
+                    return {'status': status, 'hashrate': hashrate, 'active_pools': len(pool_list), 'pool_list': pool_list[:20]}
+                return {'status': status, 'hashrate': hashrate, 'active_pools': 0, 'pool_list': []}
+            return {'status': '', 'hashrate': '', 'active_pools': 0, 'pool_list': []}
+        except Exception:
+            return {'status': '', 'hashrate': '', 'active_pools': 0, 'pool_list': []}
+
+    async def fetch_social_metrics(self, website_link: str) -> Dict[str, Any]:
+        """Récupère les métriques sociales (Twitter/X, Telegram, Discord, Reddit)"""
+        result = {'twitter_followers': 0, 'telegram_members': 0, 'discord_members': 0, 'reddit_subscribers': 0}
+        async with aiohttp.ClientSession(
+            headers={'User-Agent': self.user_agent},
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as session:
+            async def fetch_twitter():
+                try:
+                    m = re.search(r'twitter\.com/([^/]+)', website_link or '')
+                    if not m:
+                        m = re.search(r'x\.com/([^/]+)', website_link or '')
+                    if m:
+                        r = await session.get(f"https://api.twitter.com/v1/users/{m.group(1)}.json")
+                        if r.status == 200:
+                            data = json.loads(await r.text())
+                            result['twitter_followers'] = int(data.get('followers_count', 0))
+                except Exception:
+                    pass
+
+            async def fetch_telegram():
+                try:
+                    m = re.search(r't\.me/([^/?]+)', website_link or '')
+                    if not m:
+                        r = await session.get(f"https://api.telegram.org/bot/getChat?chat_id=@{m.group(1)}")
+                        if r.status == 200:
+                            data = json.loads(await r.text())
+                            if 'ok' in data and data['ok']:
+                                result['telegram_members'] = int(data.get('result', {}).get('members_count', 0))
+                except Exception:
+                    pass
+
+            async def fetch_discord():
+                try:
+                    m = re.search(r'discord\.com/invite/([^?]+)', website_link or '')
+                    if m:
+                        r = await session.get(f"https://discord.com/api/v9/invites/{m.group(1)}?with_counts=true")
+                        if r.status == 200:
+                            data = json.loads(await r.text())
+                            result['discord_members'] = int(data.get('approximate_member_count', 0))
+                except Exception:
+                    pass
+
+            async def fetch_reddit():
+                try:
+                    m = re.search(r'reddit\.com/r/([^/?]+)', website_link or '')
+                    if m:
+                        r = await session.get(f"https://www.reddit.com/r/{m.group(1)}/about.json")
+                        if r.status == 200:
+                            data = json.loads(await r.text())
+                            result['reddit_subscribers'] = int(data[0]['data'].get('subscribers', 0))
+                except Exception:
+                    pass
+
+            await asyncio.gather(fetch_twitter(), fetch_telegram(), fetch_discord(), fetch_reddit())
+        return result
+
+    async def analyze_tokenomics(self, content: str) -> Dict[str, Any]:
+        """Analyse le tokenomics via LLM"""
+        prompt = f"""
+        Analyse le tokenomics de ce projet crypto basé sur l'annonce suivante:
+
+        TOKENOMICS CHECKLIST:
+        1. Distribution des tokens (équipe, public, investisseurs, fond)
+        2. Vesting/cliff pour l'équipe et early investors
+        3. Inflation/deflation (émission, burning, mécanismes de déflation)
+        4. Valeur accrue (yield, staking, gouvernance)
+        5. Risques tokenomiques
+
+        CONTENU:
+        {content[:3000]}
+
+        REPONSE EN JSON STRICT:
+        {{
+            "token_distribution": "description de la distribution",
+            "team_allocation": "pourcentage ou description",
+            "vesting_period": "description du vesting",
+            "inflation_model": "inflationniste/deflationnaire/neutre",
+            "burn_mechanisms": ["liste des mécanismes"],
+            "utility_description": "utilisation du token",
+            "tokenomics_risks": ["liste de risques"],
+            "tokenomics_score": score 0-100
+        }}
+        """
+
+        loop = asyncio.get_running_loop()
+
+        def _chat() -> str:
+            response = ollama.chat(model=self.model, messages=[
+                {'role': 'user', 'content': prompt}
+            ])
+            return response['message']['content']
+
+        try:
+            result_text = await loop.run_in_executor(None, _chat)
+        except Exception as e:
+            logger.error(f"Tokenomics analysis error: {e}")
+            return {}
+
+        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        if not json_match:
+            logger.warning("No JSON found in tokenomics analysis")
+            return {}
+
+        try:
+            analysis = json.loads(json_match.group())
+            score = int(analysis.get('tokenomics_score', 0))
+            analysis['tokenomics_score'] = max(0, min(100, score))
+            for list_key in ('burn_mechanisms', 'tokenomics_risks'):
+                if not isinstance(analysis[list_key], list):
+                    analysis[list_key] = []
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            logger.error(f"Invalid JSON from tokenomics: {e}")
+            return {}
+
+        return analysis
 
     @staticmethod
     def _clamp(value: int) -> int:

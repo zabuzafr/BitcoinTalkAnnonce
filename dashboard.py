@@ -75,6 +75,11 @@ def _row_to_project(row: sqlite3.Row, include_lists: bool = False) -> Dict[str, 
         "last_updated": row["last_updated"] or "",
         "is_promising": bool(row["is_promising"]),
         "is_active": bool(row["is_active"]),
+        "quality_level": row["quality_level"] or "",
+        "innovation_level": row["innovation_level"] or "",
+        "quantum_risk_score": row["quantum_risk_score"] or 0.0,
+        "mining_type": row["mining_type"] or "",
+        "quality_note": row["quality_note"] or "",
     }
     if include_lists:
         data["unique_features"] = _decode_json(row["unique_features"])
@@ -776,6 +781,72 @@ def api_projects(
         conn.row_factory = sqlite3.Row
         cur = conn.execute(sql, params)
         rows = cur.fetchall()
+    return [_row_to_project(r) for r in rows]
+
+
+@app.get("/api/promising")
+def api_promising(
+    request: Request,
+    include_inactive: int = 0,
+    limit: int = 30,
+) -> List[Dict[str, Any]]:
+    limit = min(limit, 100) or 30
+    path = Path(DB_PATH)
+    if not path.exists():
+        return []
+
+    active_clauses: List[str] = [
+        "p.quality_level IS NOT NULL",
+        "p.innovation_level IS NOT NULL",
+        "p.status NOT IN ('spam', 'abandoned', 'dead')",
+    ]
+    inactive_clauses: List[str] = [
+        "p.quality_level IS NOT NULL",
+        "p.innovation_level IS NOT NULL",
+    ]
+
+    where = f" WHERE {' AND '.join(active_clauses)}"
+
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rank_sql = (
+            f"SELECT * FROM ("
+            f"  SELECT p.*, ROW_NUMBER() OVER (ORDER BY COALESCE(p.final_score, 0) DESC, p.analysis_date DESC) AS rank_num "
+            f"  FROM projects p{where}"
+            f") WHERE rank_num <= ? ORDER BY rank ASC"
+        )
+        cur = conn.execute(rank_sql, (limit,))
+        rows = cur.fetchall()
+
+    return [_row_to_project(r) for r in rows]
+
+
+@app.get("/api/trending")
+def api_trending(
+    request: Request,
+    limit: int = 30,
+) -> List[Dict[str, Any]]:
+    limit = min(limit, 100) or 30
+    path = Path(DB_PATH)
+    if not path.exists():
+        return []
+
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        sql = (
+            f"SELECT p.*, "
+            f"MAX(ah.analysis_date) AS latest_analysis, "
+            f"COUNT(ah.topic_id) AS analysis_count "
+            f"FROM projects p "
+            f"INNER JOIN analysis_history ah ON ah.topic_id = p.topic_id "
+            f"WHERE p.is_active = 1 "
+            f"GROUP BY p.topic_id "
+            f"ORDER BY latest_analysis DESC, COALESCE(p.final_score, 0) DESC "
+            f"LIMIT ?"
+        )
+        cur = conn.execute(sql, (limit,))
+        rows = cur.fetchall()
+
     return [_row_to_project(r) for r in rows]
 
 

@@ -49,7 +49,9 @@
     "logger_save_error": "Erreur sauvegarde projet: {error}",
     "logger_scan_page": "Scan de la page {page}/{total}",
     "logger_scan_error": "Erreur lors du scan: {error}",
-    "logger_report_error": "Erreur lors de la génération du rapport: {error}"
+    "logger_report_error": "Erreur lors de la génération du rapport: {error}",
+    "reanalyze_start": "Ré analyse du projet {topic_id}: {url}",
+    "reanalyze_done": "Ré analyse terminée pour {topic_id}"
   },
   "dashboard": {
     "title": "BitcoinTalk — Tableau de bord",
@@ -126,6 +128,16 @@
     "act_queued": "Analyse planifiée",
     "error_busy": "Analyse déjà en cours",
     "error_down": "LLM indisponible",
-    "inc_inactive": "Inclure les inactifs"
+    "inc_inactive": "Inclure les inactifs",
+    "quality_level": "Niveau de qualité",
+    "innovation_level": "Niveau d'innovation",
+    "quantum_risk": "Risque quantique",
+    "mining_type": "Type de minage",
+    "quality_note": "Note qualité",
+    "trending_title": "Projets tendance",
+    "promising_title": "Projets prometteurs",
+    "algo_total": "{n} au total",
+    "scan_found": "{n} nouveau(x)",
+    "scan_pages": "{done}/{total}"
   }
 }

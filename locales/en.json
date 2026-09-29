@@ -49,7 +49,9 @@
     "logger_save_error": "Error saving project: {error}",
     "logger_scan_page": "Scanning page {page}/{total}",
     "logger_scan_error": "Error during scan: {error}",
-    "logger_report_error": "Error generating report: {error}"
+    "logger_report_error": "Error generating report: {error}",
+    "reanalyze_start": "Re-analyzing project {topic_id}: {url}",
+    "reanalyze_done": "Re-analysis complete for {topic_id}"
   },
   "dashboard": {
     "title": "BitcoinTalk — Dashboard",
@@ -126,6 +128,16 @@
     "act_queued": "Analysis queued",
     "error_busy": "Analysis already in progress",
     "error_down": "LLM unavailable",
-    "inc_inactive": "Include inactive"
+    "inc_inactive": "Include inactive",
+    "quality_level": "Quality level",
+    "innovation_level": "Innovation level",
+    "quantum_risk": "Quantum risk",
+    "mining_type": "Mining type",
+    "quality_note": "Quality note",
+    "trending_title": "Trending projects",
+    "promising_title": "Promising projects",
+    "algo_total": "{n} total",
+    "scan_found": "{n} new",
+    "scan_pages": "{done}/{total}"
   }
 }
