@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="__DEFAULT_LANG__" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BitcoinTalk</title>
+<meta name="description" content="Carnet d'analyse des annonces Proof-of-Work BitcoinTalk.">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<svg width="0" height="0" aria-hidden="true" focusable="false" class="sprite">
+  <symbol id="i-overview" viewBox="0 0 24 24"><path d="M4 4h6v7H4zM14 4h6v4h-6zM14 11h6v9h-6zM4 14h6v6H4z"/></symbol>
+  <symbol id="i-projects" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></symbol>
+  <symbol id="i-enrich" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.5 1.5M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.5-1.5"/></symbol>
+  <symbol id="i-token" viewBox="0 0 24 24"><path d="M12 3v18M7 7h7a3 3 0 0 1 0 6H7h7a3 3 0 0 1 0 6H7"/></symbol>
+  <symbol id="i-mining" viewBox="0 0 24 24"><path d="M3 18h18M6 18V9l6-4 6 4v9M10 18v-4h4v4"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m20 20-3.6-3.6"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.4 2.6 2.4 13.4 0 16M12 4c-2.4 2.6-2.4 13.4 0 16"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v6H4V6h6"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4 2 20h20zM12 10v4M12 17v.1"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 2v3M14 2v3M10 19v3M14 19v3M2 10h3M2 14h3M19 10h3M19 14h3"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 13 5 5L20 7"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5zM9 4v5h6V4M8 20v-6h8v6"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2 6M20 5v6h-6"/></symbol>
+</svg>
+
+<div class="app">
+
+  <div class="scrim" id="scrim" hidden></div>
+
+  <aside class="rail" id="rail">
+    <div class="rail-head">
+      <a class="wordmark" href="/">
+        <span class="wordmark-glyph" aria-hidden="true">₿</span>
+        <span class="wordmark-text">
+          <span class="wordmark-name">BitcoinTalk</span>
+          <span class="wordmark-sub" data-i18n="nav.subtitle">Carnet d'analyse</span>
+        </span>
+      </a>
+      <button type="button" class="rail-close" id="rail-close" aria-label="Fermer le menu">
+        <svg class="ic" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>
+    </div>
+
+    <nav class="nav" aria-label="Navigation principale">
+      <p class="nav-label" data-i18n="nav.group_analysis">Analyse</p>
+      <button type="button" class="nav-item is-active" data-tab="overview" aria-current="page">
+        <svg class="ic" aria-hidden="true"><use href="#i-overview"/></svg>
+        <span data-i18n="nav.overview">Vue d'ensemble</span>
+      </button>
+      <button type="button" class="nav-item" data-tab="projects">
+        <svg class="ic" aria-hidden="true"><use href="#i-projects"/></svg>
+        <span data-i18n="nav.projects">Projets</span>
+        <span class="nav-count" id="nav-projects-count">0</span>
+      </button>
+      <button type="button" class="nav-item" data-tab="enrichment">
+        <svg class="ic" aria-hidden="true"><use href="#i-enrich"/></svg>
+        <span data-i18n="nav.enrichment">Enrichissement</span>
+      </button>
+      <button type="button" class="nav-item" data-tab="tokenomics">
+        <svg class="ic" aria-hidden="true"><use href="#i-token"/></svg>
+        <span data-i18n="nav.tokenomics">Tokenomics et code</span>
+      </button>
+      <button type="button" class="nav-item" data-tab="mining">
+        <svg class="ic" aria-hidden="true"><use href="#i-mining"/></svg>
+        <span data-i18n="nav.mining">Minage</span>
+      </button>
+    </nav>
+
+    <div class="rail-tools">
+      <p class="nav-label" data-i18n="nav.group_tools">Outils</p>
+
+      <div class="field">
+        <label for="scan-section" data-i18n="scan.section">Section</label>
+        <input type="number" id="scan-section" min="1" max="500" value="__DEFAULT_SECTION__" inputmode="numeric">
+      </div>
+      <div class="field">
+        <label for="scan-pages" data-i18n="scan.pages_label">Pages</label>
+        <input type="number" id="scan-pages" min="1" max="20" value="3" inputmode="numeric">
+      </div>
+      <button type="button" class="btn btn-primary" id="btn-scan">
+        <svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>
+        <span data-i18n="scan.start">Lancer un scan</span>
+      </button>
+
+      <div class="scan-live" id="scan-live" hidden>
+        <div class="meter-track"><div class="meter-fill" id="scan-fill"></div></div>
+        <p class="scan-status" id="scan-status" data-i18n="scan.idle">Prêt</p>
+      </div>
+
+      <details class="llm-box" id="llm-box">
+        <summary class="llm-summary" id="llm-summary">
+          <svg class="ic" aria-hidden="true"><use href="#i-cpu"/></svg>
+          <span data-i18n="llm.title">Modèle LLM</span>
+          <span class="llm-badge" id="llm-badge">ollama</span>
+        </summary>
+
+        <div class="llm-body">
+          <div class="field">
+            <label for="llm-provider" data-i18n="llm.provider">Fournisseur</label>
+            <select id="llm-provider">
+              <option value="ollama" data-i18n="llm.provider_ollama">Ollama local</option>
+              <option value="openai" data-i18n="llm.provider_openai">API compatible ChatGPT</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="llm-model" data-i18n="llm.model">Modèle</label>
+            <select id="llm-model"></select>
+            <button type="button" class="btn btn-quiet" id="llm-refresh">
+              <svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg>
+              <span data-i18n="llm.refresh">Rafraîchir</span>
+            </button>
+            <datalist id="llm-models"></datalist>
+            <p class="field-note" id="llm-models-note"></p>
+          </div>
+
+          <div class="field" id="llm-ollama-field">
+            <label for="llm-ollama-host" data-i18n="llm.ollama_host">Hôte Ollama</label>
+            <input type="url" id="llm-ollama-host" placeholder="http://localhost:11434" autocomplete="off" spellcheck="false">
+          </div>
+
+          <div class="field" id="llm-base-field" hidden>
+            <label for="llm-api-base" data-i18n="llm.api_base">URL de base</label>
+            <input type="url" id="llm-api-base" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false">
+          </div>
+
+          <div class="field" id="llm-key-field" hidden>
+            <label for="llm-api-key" data-i18n="llm.api_key">Clé API</label>
+            <input type="password" id="llm-api-key" autocomplete="new-password" spellcheck="false">
+            <p class="field-note" id="llm-key-note"></p>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="llm-temperature" data-i18n="llm.temperature">Température</label>
+              <input type="number" id="llm-temperature" min="0" max="2" step="0.1">
+            </div>
+            <div class="field">
+              <label for="llm-timeout" data-i18n="llm.timeout">Délai (s)</label>
+              <input type="number" id="llm-timeout" min="10" max="600" step="5">
+            </div>
+          </div>
+
+          <p class="llm-msg" id="llm-msg" role="status" aria-live="polite" hidden></p>
+
+          <div class="llm-actions">
+            <button type="button" class="btn" id="llm-test">
+              <svg class="ic" aria-hidden="true"><use href="#i-check"/></svg>
+              <span data-i18n="llm.test">Tester</span>
+            </button>
+            <button type="button" class="btn btn-primary" id="llm-save">
+              <svg class="ic" aria-hidden="true"><use href="#i-save"/></svg>
+              <span data-i18n="llm.save">Enregistrer</span>
+            </button>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="rail-foot">
+      <div class="lang-field">
+        <svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg>
+        <label class="visually-hidden" for="lang" data-i18n="nav.language">Langue</label>
+        <select id="lang"></select>
+      </div>
+    </div>
+  </aside>
+
+  <main class="paper" id="paper">
+
+    <div class="paper-bar">
+      <button type="button" class="rail-toggle" id="rail-toggle" aria-label="Ouvrir le menu" aria-expanded="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg>
+      </button>
+      <h1 class="paper-title" id="leaf-title" data-i18n="nav.overview">Vue d'ensemble</h1>
+      <span class="paper-note" id="leaf-note"></span>
+    </div>
+
+    <div class="tabs" role="tablist" data-i18n-aria="nav.tablist">
+      <button type="button" role="tab" class="tab is-active" data-tab="overview" aria-selected="true"><span data-i18n="nav.overview">Vue d'ensemble</span></button>
+      <button type="button" role="tab" class="tab" data-tab="projects" aria-selected="false"><span data-i18n="nav.projects">Projets</span></button>
+      <button type="button" role="tab" class="tab" data-tab="enrichment" aria-selected="false"><span data-i18n="nav.enrichment">Enrichissement</span></button>
+      <button type="button" role="tab" class="tab" data-tab="tokenomics" aria-selected="false"><span data-i18n="nav.tokenomics">Tokenomics et code</span></button>
+      <button type="button" role="tab" class="tab" data-tab="mining" aria-selected="false"><span data-i18n="nav.mining">Minage</span></button>
+    </div>
+
+    <section class="leaf is-active" id="leaf-overview" role="tabpanel" data-leaf="overview">
+
+      <div class="kpi-row stats-grid" id="kpis" aria-live="polite">
+        <div class="kpi"><p class="kpi-label">&nbsp;</p><p class="kpi-value">0</p></div>
+      </div>
+
+      <div class="split">
+        <article class="panel ts-panel">
+          <header class="panel-head">
+            <h2 class="panel-title" data-i18n="ts.title">Analyses par période</h2>
+            <div class="segmented" role="group">
+              <button type="button" data-period="week" aria-pressed="false" data-i18n="ts.week">Semaine</button>
+              <button type="button" data-period="month" aria-pressed="true" data-i18n="ts.month">Mois</button>
+              <button type="button" data-period="year" aria-pressed="false" data-i18n="ts.year">Année</button>
+            </div>
+          </header>
+          <div class="chart" id="chart" role="img" aria-label="Analyses par période"></div>
+          <div class="chart-axis" id="chart-axis"></div>
+        </article>
+
+        <article class="panel algo-panel">
+          <header class="panel-head">
+            <h2 class="panel-title" data-i18n="algo.title">Répartition par algorithme</h2>
+            <span class="panel-note" id="algo-total"></span>
+          </header>
+          <div class="meter-list" id="meters"></div>
+        </article>
+      </div>
+
+    </section>
+
+    <section class="leaf" id="leaf-projects" role="tabpanel" data-leaf="projects" hidden>
+
+      <div class="toolbar">
+        <div class="search-field">
+          <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg>
+          <label class="visually-hidden" for="search" data-i18n="projects.search_label">Rechercher un projet</label>
+          <input type="search" id="search" data-i18n-ph="projects.search_placeholder" placeholder="Titre, auteur, algorithme" autocomplete="off">
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="include-inactive">
+          <span class="switch-track" aria-hidden="true"></span>
+          <span data-i18n="projects.include_inactive">Inactifs</span>
+        </label>
+        <div class="select-field">
+          <label class="visually-hidden" for="sort" data-i18n="projects.sort_label">Trier par</label>
+          <select id="sort">
+            <option value="final_score:desc" data-i18n="projects.sort_score">Score</option>
+            <option value="analysis_date:desc" data-i18n="projects.sort_recent">Plus récents</option>
+            <option value="title:asc" data-i18n="projects.sort_title">Titre</option>
+          </select>
+        </div>
+        <span class="result-count" id="result-count"></span>
+      </div>
+
+      <div class="project-grid" id="rows"></div>
+
+    </section>
+
+    <section class="leaf" id="leaf-enrichment" role="tabpanel" data-leaf="enrichment" hidden>
+      <div class="kpi-row" id="coverage-kpis" aria-live="polite"></div>
+      <article class="panel">
+        <header class="panel-head">
+          <h2 class="panel-title" data-i18n="enrich.matrix">Sources par projet</h2>
+        </header>
+        <div class="table-wrap">
+          <table class="ledger" id="coverage-table">
+            <thead>
+              <tr>
+                <th scope="col" data-i18n="enrich.col_project">Projet</th>
+                <th scope="col" data-i18n="enrich.col_github">GitHub</th>
+                <th scope="col" data-i18n="enrich.col_whitepaper">Whitepaper</th>
+                <th scope="col" data-i18n="enrich.col_coingecko">CoinGecko</th>
+                <th scope="col" data-i18n="enrich.col_social">Social</th>
+                <th scope="col" data-i18n="enrich.col_mining">Minage</th>
+              </tr>
+            </thead>
+            <tbody id="coverage-body"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="leaf" id="leaf-tokenomics" role="tabpanel" data-leaf="tokenomics" hidden>
+      <div class="split split-even">
+        <article class="panel">
+          <header class="panel-head">
+            <h2 class="panel-title" data-i18n="tok.title">Score de tokenomics</h2>
+          </header>
+          <div class="meter-list" id="tok-meters"></div>
+        </article>
+        <article class="panel">
+          <header class="panel-head">
+            <h2 class="panel-title" data-i18n="src.title">Maturité du code source</h2>
+          </header>
+          <div class="meter-list" id="src-meters"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="leaf" id="leaf-mining" role="tabpanel" data-leaf="mining" hidden>
+      <div class="kpi-row" id="mining-kpis" aria-live="polite"></div>
+
+      <div class="leaf-head">
+        <h2 class="leaf-title" data-i18n="mine.title">Projets minables</h2>
+      </div>
+      <div class="project-grid" id="mining-rows"></div>
+    </section>
+
+  </main>
+</div>
+
+<div class="overlay" id="overlay" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-heading">
+    <button type="button" class="sheet-close" id="sheet-close" aria-label="Fermer">
+      <svg class="ic" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
+    <div id="sheet-body"></div>
+    <div class="link-row" id="sheet-actions"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

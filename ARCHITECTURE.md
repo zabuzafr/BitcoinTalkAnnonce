@@ -7,8 +7,90 @@
 > - la correction **CORRECTION-1** (`esc()` à `dashboard.py:243`, plus d'`escapeHtml` inventé) ;
 > - le plan i18n, le registre des risques et les questions ouvertes.
 >
-> Version : 1.0 — à valider par le Master Agent avant toute implémentation.
+> Version : 2.0 — implémentée. Voir « État d'implémentation » ci-dessous pour
+> l'écart entre la spécification d'origine et le code livré.
 > Langue du document : français (langue du projet). Langue du code : identifiants en anglais, commentaires interdits hors docstrings existantes.
+
+---
+
+## État d'implémentation (2026-09-30)
+
+La spécification v2 (T1, T2, T3, scan async, ré-analyse) est livrée et vérifiée par
+`tests/` (**346 tests, 100 % de passage, aucun skip, aucun accès réseau requis**).
+
+Écarts assumés par rapport au document d'origine :
+
+| Sujet | Spécifié v1 | Livré v2 | Raison |
+|---|---|---|---|
+| Dépendances | `requirements.txt` gelé (7 deps) | + `pypdf>=6.0.0` | Extraction du texte des whitepapers PDF, décision explicite de l'utilisateur. Aucune autre dépendance : ni framework JS, ni CDN, ni librairie de charting. |
+| Rendu du dashboard | HTML/CSS inline dans `dashboard.py` | `static/index.html` + `static/app.css` + `static/app.js` | Séparation des responsabilités ; le HTML embarqué représentait ~570 lignes dans le module API. Servi par l'application, sans build ni bundler. |
+| Échappement | `esc()` dans le template Python | `esc()` + `escAttr()` + `safeUrl()` côté client | Le DOM est alimenté par des données JSON, donc l'échappement se fait à l'écriture du DOM. `esc()` seul ne couvrait ni les guillemets (injection d'attribut) ni les schémas d'URL (`javascript:`). |
+| Sélecteurs CSS | `.stats-grid`, `.ts-panel`, `.algo-panel` | Conservés **en alias** de `.kpi-row`, `.ts-panel`, `.algo-panel` | Les sélecteurs documentés restent stables pour les tests d'intégration externes, sans figer le design. |
+| Navigation | Flux monolithique à sections ancrées | **Carnet à cinq onglets** + sidebar verticale | `overview`, `projects`, `enrichment`, `tokenomics`, `mining` : un seul document, une seule source d'état (`activeTab`), aucun rechargement. Sidebar en `<nav>`, répliquée en barre d'onglets supérieure et en tiroir sous 900 px. |
+| Clés i18n | ~30 clés | 13 sections FR + 13 EN, parité stricte, zéro clé orpheline | La refonte a densifié l'interface (détail, chaîne d'enrichissement, tokenomics, code source, minage) et l'a répartie en sections nommées (`nav`, `scan`, `ts`, `algo`, `projects`, `enrich`, `tok`, `src`, `mine`). |
+
+### Sélecteurs stables garantis
+
+`.stats-grid`, `.ts-panel` et `.algo-panel` sont conservés et couverts par
+`test_documented_v2_selectors_present`.
+
+### Contrat front/back
+
+Le DOM est alimenté par du JSON : toute divergence de schéma se traduit par un
+panneau vide plutôt que par une erreur visible. `TestFrontendApiContract` fige
+donc les champs consommés par `static/app.js` (`/api/stats`,
+`/api/stats/timeseries`, `/api/stats/by_algorithm`, `/api/projects`,
+`/api/projects/{id}`, `/api/history/{id}`, `/api/scan/status`, `/api/trending`,
+`/api/promising`), y compris les sous-champs de `source_analysis`.
+
+`TestFrontendContract` remplace le test navigateur absent de l'environnement :
+il vérifie que chaque `$("id")` existe, que chaque `data-tab` a son `data-leaf`,
+que chaque `<use href="#i-...">` pointe un `<symbol>` défini, que chaque classe
+émise par `app.js` a une règle CSS, qu'aucune ressource externe n'est référencée
+et qu'une seule échelle de rayon est utilisée.
+
+`TestStaticPlaceholderSafety` verrouille deux invariants que le navigateur seul
+révélait : `app.js` et `app.css` sont servis tels quels par `StaticFiles`, donc
+aucun placeholder `__DEFAULT_*` ne doit y subsister, et la grille `.project-grid`
+doit rester bornée (`min(Npx, 100%)` plus `min-width: 0` sur `.project`) faute de
+quoi la largeur min-content d'un titre en `-webkit-line-clamp` fait déborder la
+page horizontalement en mobile.
+
+### Vérification navigateur
+
+L'environnement ne dispose pas de geckodriver, mais Firefox expose **Marionette**,
+son protocole natif. `bt_audit.py` et `bt_interactions.py` l'interrogent en JSON
+sur le port 2828 et pilotent la vraie page : débordement horizontal, éléments hors
+viewport, contraste WCAG, cibles tactiles, ouverture du détail, recherche, tri,
+bascule de langue et tiroir mobile. Ces deux scripts sont des outils de
+vérification, pas des tests de la suite : ils exigent un serveur actif et
+`firefox` dans le `PATH`.
+
+### Modules et responsabilités
+
+| Fichier | Responsabilité |
+|---|---|
+| `llm.py` | Fournisseurs LLM interchangeables (Ollama local, API compatible ChatGPT), configuration, masquage de la clé, test de joignabilité. |
+| `bitcointalk.py` | Crawler, scoring, appels LLM via `llm.ChatClient`, collecte externe, persistance SQLite. |
+| `dashboard.py` | API FastAPI, routes, traduction, service de `static/`. |
+| `static/app.js` | Rendu client, graphiques, interactions. Unique emplacement des garde-fous d'échappement. |
+| `static/app.css` | Design system, sans dépendance externe. |
+| `locales/fr.json`, `locales/en.json` | Catalogues de traduction. |
+
+### Variables d'environnement
+
+`BT_DB_PATH`, `BT_BOARD_ID`, `BT_LOG_FILE`, `BT_GITHUB_TOKEN`, `BT_COINGECKO_API_KEY`.
+
+### Limites connues des sources externes
+
+- `data.miningpoolstats.stream` renvoie HTTP 403 aux appels automatisés. Le lien profond
+  `miningpoolstats.stream/?a=<algorithme>` reste produit, et les métriques numériques ne
+  proviennent de `mempool.space` que pour les algorithmes réellement Bitcoin (SHA-256) :
+  renvoyer le hashrate Bitcoin pour Scrypt ou RandomX serait un contresens métier.
+- Les métriques Telegram exigent un aperçu public de la chaîne ; le collecteur reste
+  silencieux sinon. L'API publique Discord répond normalement.
+- L'analyse de code source s'appuie sur les métadonnées du dépôt et son README. Elle ne
+  clone pas l'arborescence : c'est un choix assumé, pas un oubli.
 
 ---
 
@@ -18,12 +100,12 @@ Outil monolithique Python composé de deux exécuteurs :
 
 | Exécuteur | Rôle | Entrée | Sortie |
 |---|---|---|---|
-| `bitcointalk.py` (async, `main()` L601) | Crawler + pipeline d'analyse Ollama + persistance SQLite | Section 64 de BitcoinTalk (et/ou topic ID) | Table `projects` enrichie |
+| `bitcointalk.py` (async, `main()`) | Crawler + pipeline d'analyse LLM + persistance SQLite | Section 64 de BitcoinTalk (et/ou topic ID) | Table `projects` enrichie |
 | `dashboard.py` (FastAPI, 535 L) | API JSON + UI HTML/CSS/JS vanilla embarquée | SQLite (lecture seule) | `crypto_analysis.db` |
 
 Contraintes durables du projet :
 
-1. **Zéro nouvelle dépendance externe.** Tout le périmètre de la v2 (T1, T2, T3, Scan async, Ré-analyse) est réalisable avec la stack existante. `requirements.txt` (7 deps : aiohttp, beautifulsoup4, fastapi, ollama, pandas, requests, uvicorn) **n'est pas modifié**.
+1. **Zéro nouvelle dépendance externe.** Tout le périmètre de la v2 (T1, T2, T3, Scan async, Ré-analyse) est réalisable avec la stack existante. `requirements.txt` (7 deps : aiohttp, beautifulsoup4, fastapi, ollama, pandas, requests, uvicorn) **n'est pas modifié**. La couche `llm.py` n'utilise que `requests` déjà présent : le fournisseur Ollama est appelé en HTTP brut, sans passer par le client `ollama`.
 2. **SQLite unique source de vérité.** Pas de cache, pas de file, pas de worker séparé. La concurrence intra-processus est gérée par `asyncio`.
 3. **Une base, deux schémas.** `projects` (26 colonnes actuelles → 27 après Phase 0) et `analysis_history` (10 colonnes, immuable, journal des ré-analyses).
 4. **Règle d'écrasement douce.** Aucune suppression physique de projet (décision D2).
@@ -127,8 +209,8 @@ def save_project(self, project: CryptoProject) -> None:
 - L108 : `init_database()` — `CREATE TABLE IF NOT EXISTS projects (…)` (L112) — **26 colonnes** (y compris `last_updated` qui n'existe pas dans le dataclass : alimenté côté application dans `save_project`).
 - L141 : `CREATE TABLE IF NOT EXISTS analysis_history (…)` — 10 colonnes, INSERT-only.
 - L168 : `fetch_with_retry(url, retries=3)` — retry manuel (pas de `tenacity` dans `requirements.txt`).
-- L297 : `_clamp` — clamp des 4 axes de scoring ; contrat Ollama strict-JSON 12 clés.
-- L375 : `process_announcement(topic_id, url)` — parcours d'un topic, extraction via BeautifulSoup, scoring Ollama.
+- `_clamp` — clamp des 4 axes de scoring ; contrat LLM strict-JSON 12 clés.
+- `process_announcement(topic_id, url)` — parcours d'un topic, extraction via BeautifulSoup, scoring via `llm.ChatClient`.
 - L445 : `save_project(project)` — **`INSERT OR REPLACE`**, cible du fix D4 ; alimente `last_updated`.
 - L485 : `scan_bitcointalk_section(section_id, pages)` — loop pages, fetch du listing, extraction des topic_id, appel à `process_announcement`.
 - L535 : `generate_report()` — synthèse finale.
@@ -166,7 +248,30 @@ def save_project(self, project: CryptoProject) -> None:
 - `tests/conftest.py` — 45 L : fixtures `db_path`, `client` (TestClient FastAPI), DB temporaire par test.
 - `tests/test_dashboard.py` — 181 L : couverture des endpoints existants. **~150 L nouveaux tests** à ajouter (27 tests minimum §13).
 
-### 3.6 `crypto_analysis.db`
+### 3.6 `urlclean.py`
+
+Module sans dépendance externe chargé de transformer un fragment de texte brut
+en URL joignable, ou de le rejeter. Les annonces collent l'URL au mot suivant, à
+un emoji ou à une autre URL ; la sortie de `extract_links` est donc reconstruite
+à partir de règles, pas d'une expression régulière unique.
+
+| Fonction | Rôle |
+|---|---|
+| `split_candidates(text)` | Isole les zones denses de caractères, puis découpe à chaque `://` de schéma reconnu. `bitfuchttps://bitfuc.com` reste une seule URL : le dépôt s'appelle `bitfuc`, le mot `https` est un faux début de second lien. |
+| `clean_url(raw)` | Tronque aux caractères RFC 3986, retire la ponctuation de phrase, répare l'hôte collé (`noj.viporlab.netStratum:` → `noj.viporlab.net`), coupe un second `://` résiduel et retire la rubrique d'annonce agglutinée au chemin (`/Source:`, `/Mempoolhttps`). Valide ensuite hôte, schéma et longueur. |
+| `canonical_github(raw)` | Réduit un lien GitHub à la racine du dépôt source : `releases/tag/…`, `blob/main/…`, `raw/…`, `.git` collé. Un chemin de `github.com` qui n'est pas un dépôt (`orgs/…`) renvoie une chaîne vide. Le dépôt est cherché dans tous les fragments, donc un `topic=…GitHub:https://github.com/o/r` collé à un lien du fil est récupéré. |
+| `is_project_site(url)` | Écarte les liens de service : fil du forum, réseaux sociaux, explorateurs (`solscan.io`), pools et RPC (`pool.`, `explorer.`, `rpc.`). |
+| `is_whitepaper_url(url)` | Mot-clé (`whitepaper`, `litepaper`, `docs/`) ou extension de document (`.pdf`, `.md`…). |
+
+Le nettoyage est appliqué à deux endroits, volontairement : `extract_links` à
+l'écriture, `_stored_link` dans `dashboard.py` à la lecture. Les lignes
+déjà en base restent affichables sans migration, mais restent sales pour qui lit
+SQLite directement ; `repair_links.py` (rapport par défaut, `--apply` pour
+écrire) corrige ces lignes. Les chemins de dépôt GitHub sont exclus du retrait de
+rubrique : `CmusicWallet` et `Zagros-Wallet` sont des noms de dépôt, pas des
+mots d'annonce.
+
+### 3.7 `crypto_analysis.db`
 SQLite local. Deux tables décrites §3.1. Pas de migrations formelles : la DDL est dans `bitcointalk.py` (`CREATE TABLE IF NOT EXISTS`) et la colonne v2 est ajoutée par une migration idempotente ad-hoc (§4, Phase 0).
 
 ---
@@ -431,7 +536,7 @@ POST /api/projects/{topic_id}/analyze
     → 202 { "topic_id": …, "status": "queued" }
     → 404 { "detail": "project not found" }            (pas en DB)
     → 409 { "detail": "analyzing" }                     (déjà en cours, 409 via _reanalyzing)
-    → 503 { "detail": "ollama_unavailable" }            (Ollama down détecté par le worker)
+    → 503 { "detail": "llm_unavailable" }              (fournisseur configuré injoignable)
 ```
 - Lecture préalable : `SELECT 1 FROM projects WHERE id=?` → 404 si absent.
 - `topic_id in _reanalyzing` → 409 immédiat.
@@ -515,7 +620,16 @@ Règle : **aucune clé orpheline** — chaque clé ajoutée dans `fr.json` est a
 - **Injection SQL** : toutes les requêtes sont paramétrées (`?`) — inchangé, à maintenir. Le paramètre `include_inactive` est **normalisé booléen** avant d'être branché dans une des deux variantes SQL statiques (§5.2, §7.3) — **pas** d'interpolation de la valeur dans la requête.
 - **Exposure** : `DB_PATH` via env `BT_DB_PATH` (déjà le cas). Le dashboard n'expose aucun path système dans les erreurs.
 - **Exécution concurrente des scans** : `asyncio.Lock` single-flight (§8) — pas de double exécution même sur double clic.
-- **Ollama** : accès local `http://localhost:11434` (config existante) ; échec → 503 structuré, pas de retry exponentiel v1.
+- **Fournisseur LLM** : deux cibles au choix, Ollama local (`http://localhost:11434`) ou toute API compatible ChatGPT/OpenAI (`POST {base}/chat/completions` + `GET {base}/models`). Échec → erreur métier translated, pas de retry exponentiel.
+- **Clé API** : jamais renvoyée par l'API REST. `LLMConfig.masked()` vide `api_key` et n'expose que `has_api_key` et les 4 derniers caractères. La valeur vit dans `llm_config.json` (mode `0600`, ignoré par Git) ou dans `BT_LLM_API_KEY`. Une sauvegarde depuis un champ vide conserve la clé existante au lieu de l'effacer.
+- **Découverte de modèles** : `POST /api/llm/models` liste les modèles réellement servis par le fournisseur (`GET /api/tags` pour Ollama, `GET {base}/v1/models` pour l'API ChatGPT). Le corps porte l'état courant des champs, pas la configuration enregistrée : basculer de fournisseur liste le bon serveur sans exiger d'enregistrement préalable. `_llm_candidate()` complète par `load_config()` mais **n'appelle pas `validate()`** — lister ne demande ni nom de modèle ni clé, sinon le panneau se fermerait avant tout choix. Un serveur injoignable donne `{models: [], error}` en `200`, jamais un `500` : le panneau reste utilisable pendant qu'un service démarre. Les métadonnées (`family`, `parameters`, `quantization`) sont facultatives ; une entrée sans elles reste listée.
+- **Trois gardes d'affichage** dans `static/app.js`, chacune issue d'un défaut constaté au navigateur :
+  - `llmState.modelsRequest` (jeton de génération) : deux réponses peuvent arriver dans l'ordre inverse des demandes ; seule la dernière peinte.
+  - `llmConfigRequest` + `llmState.editing` : le clic sur le `<summary>` et l'ouverture du `<details>` déclenchent chacun un chargement. Sans ces deux Gardiens, la réponse tardive écrasait la saisie en cours et repeignait l'ancien fournisseur.
+  - `#llm-refresh` n'est jamais `disabled` : un bouton désactivé avale le clic, et la liste restait figée tant qu'une requête était en vol. L'attente se signale par la classe `is-busy` (rotation désactivée sous `prefers-reduced-motion`).
+- **Priorité de configuration** : fichier < environnement. Toute variable active (`BT_LLM_PROVIDER`, `BT_MODEL`, `OLLAMA_HOST`, `BT_LLM_API_BASE`, `BT_LLM_API_KEY`, `BT_LLM_TEMPERATURE`, `BT_LLM_TIMEOUT`) est listée dans `env_overrides` et renvoie `409` sur `POST /api/llm/config`, plutôt que d'écrire un fichier que le rechargement ignorerait.
+- **SSRF** : l'URL de base et l'hôte Ollama sont saisis par l'utilisateur et pilotent des requêtes HTTP.
+- **Absence d'authentification** : le dashboard est lié à `0.0.0.0` par défaut, donc joignable depuis le réseau local, et il n'implémente ni session ni jeton. Toute API REST qu'il expose est donc accessible à quiconque atteint le port. Sur un réseau partagé ou non fiable, démarrer avec `BT_DASH_HOST=127.0.0.1`. Le port est paramétrable via `BT_DASH_PORT` (8080 par défaut), ce qui permet aussi d'isoler une instance d'audit.
 
 ### 12.4 Performance
 - SQLite en mode lecture seule côté dashboard ; `PRAGMA journal_mode=wal` **déjà présent** des deux sites `_connect` (`dashboard.py:21` et `bitcointalk.py:104`) — cohabitation lecture/écriture scan couverte. `PRAGMA busy_timeout=5000` **déjà présent** aux deux sites (`dashboard.py:22` et `bitcointalk.py:105`).
@@ -526,7 +640,8 @@ Règle : **aucune clé orpheline** — chaque clé ajoutée dans `fr.json` est a
   CREATE INDEX IF NOT EXISTS idx_projects_is_active     ON projects(is_active);
   ```
 - `LIMIT 12` / `top ≤ 50` bornent les jeux de résultats.
-- `Semaphore(2)` borne les ré-analyses concurrentes vers Ollama (R4).
+- `Semaphore(2)` borne les ré-analyses concurrentes vers le fournisseur LLM (R4).
+- Les appels LLM et le test de joignabilité sortent de la boucle asyncio (`asyncio.to_thread`) : un fournisseur lent ne fige pas le dashboard.
 - La complétion de buckets (T1) coûte O(12) en Python — négligeable.
 
 ---
@@ -539,7 +654,7 @@ Règle : **aucune clé orpheline** — chaque clé ajoutée dans `fr.json` est a
 | **R2** | Écrasement de la fonction `esc()` ou usage de `innerHTML` sans escape dans les nouveaux panneaux. | Moyen : XSS en cas de titre d'annonce malveillant. | Moyenne | CORRECTION-1 : grep d'audit §12.2-4 ; revue de code. |
 | **R3** | `strftime` SQLite vs `analysis_date` stockée en **texte** non ISO. | Moyen : buckets T1 vides ou erronés. | **Résolu** (format ISO-8601 confirmé à l'écriture) | Non concerné — `strftime('%Y-%m', analysis_date)` fonctionne directement sur la valeur ISO-8601 existante. |
 | **R4** | Scan long + `asyncio.to_thread` + event loop FastAPI : blocage perçu, mémoire. | Moyen : UI figée l'air, pas de crash. | Faible | `asyncio.to_thread` (pas `run_in_executor` custom) ; statut pollé ; `pages` bornée (max 20 côté API). |
-| **R5** | Ollama down pendant une ré-analyse. | Faible : un topic non ré-analysé. | Moyenne | 503 structuré ; `finally: _reanalyzing.discard` garantit pas de lock mort. |
+| **R5** | Fournisseur LLM indisponible pendant une ré-analyse. | Faible : un topic non ré-analysé. | Moyenne | 503 structuré ; `finally: _reanalyzing.discard` garantit pas de lock mort. |
 | **R6** | Clés i18n orphelines / non traduites. | Faible : texte anglais en mode fr. | Moyenne | Test de parité fr/en ; revue. |
 | **R7** | Deux scans simultanés (double-clic). | Faible : double fetch réseau, CPU. | Élevée (UX) | `asyncio.Lock` single-flight + 202 idempotent (§8.3). |
 | **R8** | SQLite concurrent write (scan + ré-analyse + dashboard). | Faible : `database is locked`. | Moyenne | WAL **déjà présent** aux deux sites `_connect` (`dashboard.py:21`, `bitcointalk.py:104`) ; `PRAGMA busy_timeout=5000` **déjà présent** aux deux sites (`dashboard.py:22`, `bitcointalk.py:105`). |

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from i18n import T, Translations, _norm, deep_merge
@@ -108,24 +110,122 @@ class TestV2Parity:
     def test_dashboard_key_sets_equal(self):
         assert set(self._catalog("en")) == set(self._catalog("fr"))
 
-    def test_dashboard_key_count(self):
-        assert len(self._catalog("en")) == 75
-        assert len(self._catalog("fr")) == 75
+    def test_key_count(self):
+        assert len(self._catalog("en")) == len(self._catalog("fr"))
+
+    def test_every_section_present_both_locales(self):
+        for section in ("nav", "scan", "ts", "algo", "projects", "enrich", "tok", "src", "mine"):
+            assert section in T._catalogs["en"], section
+            assert set(T._catalogs["en"][section]) == set(T._catalogs["fr"][section]), section
 
     def test_v2_keys_present_both_locales(self):
-        v2 = [
-            "stat_total", "stat_promising", "stat_avg", "stat_forks",
-            "stat_max", "stat_last", "ts_title", "ts_week", "ts_month",
-            "ts_year", "algo_title", "algo_unknown",
-            "scan_title", "scan_start", "scan_idle", "scan_running",
-            "scan_done", "scan_failed",
-        ]
-        for key in v2:
-            assert key in self._catalog("en"), key
-            assert key in self._catalog("fr"), key
+        expected = {
+            "dashboard": [
+                "stat_total", "stat_promising", "stat_avg", "stat_forks", "stat_max",
+                "algo_unknown", "result_count", "list_empty", "no_results",
+            ],
+            "ts": ["title", "week", "month", "year"],
+            "algo": ["title", "empty"],
+            "scan": ["section", "pages_label", "start", "idle", "running", "done", "failed"],
+            "nav": [
+                "overview", "projects", "enrichment", "tokenomics", "mining",
+                "group_analysis", "group_tools", "tablist",
+            ],
+            "enrich": ["matrix", "col_project", "kpi_github", "kpi_whitepaper"],
+            "tok": ["title", "empty"],
+            "src": ["title", "empty"],
+            "mine": ["title", "kpi_projects", "kpi_hashrate"],
+        }
+        for section, keys in expected.items():
+            for key in keys:
+                assert key in T._catalogs["en"][section], f"{section}.{key}"
+                assert key in T._catalogs["fr"][section], f"{section}.{key}"
 
-    def test_v2_values_nonempty(self):
+    def test_no_em_dash_in_any_value(self):
+        def walk(catalog, path=""):
+            for key, value in catalog.items():
+                if isinstance(value, dict):
+                    walk(value, f"{path}{key}.")
+                else:
+                    assert "\u2014" not in value and "\u2013" not in value, f"{path}{key}"
+
         for lang in ("en", "fr"):
-            for key in self._catalog(lang):
-                assert isinstance(self._catalog(lang)[key], str)
-                assert self._catalog(lang)[key].strip()
+            walk(T._catalogs[lang])
+
+    def test_static_assets_only_reference_existing_keys(self):
+        import re
+        root = Path(__file__).resolve().parent.parent
+        js = (root / "static" / "app.js").read_text(encoding="utf-8")
+        html = (root / "static" / "index.html").read_text(encoding="utf-8")
+
+        # Le lookahead exclut les clés construites par concaténation
+        # (ex. t("dashboard.act_" + action + "d")).
+        referenced = {(s, k) for s, k in re.findall(
+            r't(?:fmt)?\("([a-z_]+)\.([a-z_0-9]+)"(?!\s*\+)', js)}
+        referenced |= {(s, k) for s, k in re.findall(
+            r'data-i18n(?:-ph|-aria)?="([a-z_]+)\.([a-z_0-9]+)"', html)}
+        # Seules enable/disable sont construits par concaténation
+        # dans t("dashboard.act_" + action + "d"). reanalyze est un littéral.
+        dynamic = {("dashboard", "act_enabled"), ("dashboard", "act_disabled")}
+        referenced |= dynamic
+        # Référencés via des tables (TAB_KEYS, SOURCES) plutôt que des littéraux
+        referenced |= {("nav", k) for k in
+                       ("note_overview", "note_projects", "note_enrichment",
+                        "note_tokenomics", "note_mining")}
+        referenced |= {("enrich", k) for k in
+                       ("kpi_github", "kpi_whitepaper", "kpi_coingecko",
+                        "kpi_social", "kpi_mining")}
+
+        for section, key in sorted(referenced):
+            assert section in T._catalogs["fr"], section
+            assert key in T._catalogs["fr"][section], f"{section}.{key}"
+            assert key in T._catalogs["en"][section], f"{section}.{key}"
+
+    def test_no_orphan_dashboard_keys(self):
+        import re
+        root = Path(__file__).resolve().parent.parent
+        js = (root / "static" / "app.js").read_text(encoding="utf-8")
+        html = (root / "static" / "index.html").read_text(encoding="utf-8")
+        used = set(re.findall(r't(?:fmt)?\("dashboard\.([a-z_0-9]+)"', js))
+        used |= set(re.findall(r'data-i18n(?:-ph|-aria)?="dashboard\.([a-z_0-9]+)"', html))
+        used |= {"act_enable", "act_disable", "act_enabled", "act_disabled",
+                 "act_queued", "act_reanalyze"}
+        orphans = sorted(set(self._catalog("en")) - used)
+        assert orphans == [], f"cles dashboard orphelines : {orphans}"
+
+    def test_python_t_literals_exist(self):
+        """T.t() sur une cle absente renvoie la cle elle-meme : la ligne de log
+        perd ses arguments et l'utilisateur voit `errors.xxx` brut dans un
+        toast. Un seul test couvre tous les modules Python du projet."""
+        import re
+        root = Path(__file__).resolve().parent.parent
+        used = set()
+        for path in sorted(root.glob("*.py")):
+            used |= set(re.findall(r'T\.t\(\s*"([a-z0-9_.]+)"',
+                                   path.read_text(encoding="utf-8")))
+
+        def flatten(catalog, prefix=""):
+            keys = set()
+            for key, value in catalog.items():
+                if isinstance(value, dict):
+                    keys |= flatten(value, prefix + key + ".")
+                else:
+                    keys.add(prefix + key)
+            return keys
+
+        assert used, "aucun appel T.t() literal trouve : regex cassee ?"
+        for lang in ("en", "fr"):
+            keys = flatten(T._catalogs[lang])
+            missing = sorted(used - keys)
+            assert missing == [], f"cles T.t() absentes ({lang}) : {missing}"
+
+    def test_values_nonempty(self):
+        for lang in ("en", "fr"):
+            def walk(catalog):
+                for key, value in catalog.items():
+                    if isinstance(value, dict):
+                        walk(value)
+                    else:
+                        assert isinstance(value, str)
+                        assert value.strip(), key
+            walk(T._catalogs[lang])

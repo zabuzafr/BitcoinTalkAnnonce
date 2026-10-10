@@ -190,3 +190,53 @@ class TestApiI18n:
             assert isinstance(response.json(), dict)
         finally:
             _restore(original)
+
+
+class TestSchemaAtStartup:
+    """Le dashboard lit des colonnes qu'il ne construit pas toujours : sans
+    migration, une base d'une version antérieure casse /api/projects."""
+
+    def test_ensure_schema_creates_missing_table(self, tmp_path):
+        import bitcointalk
+        db = tmp_path / "fresh.db"
+        bitcointalk.ensure_schema(str(db))
+        import sqlite3
+        conn = sqlite3.connect(db)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(projects)")]
+        conn.close()
+        assert "topic_id" in cols
+        assert "whitepaper_text" in cols
+
+    def test_ensure_schema_migrates_old_table(self, tmp_path):
+        import bitcointalk
+        db = tmp_path / "old.db"
+        import sqlite3
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE projects (id INTEGER PRIMARY KEY,"
+                     " topic_id INTEGER, title TEXT)")
+        conn.commit()
+        conn.close()
+        bitcointalk.ensure_schema(str(db))
+        conn = sqlite3.connect(db)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(projects)")]
+        conn.close()
+        assert "content" in cols
+        assert "whitepaper_text" in cols
+
+
+class TestListPayload:
+    """Le corps complet des sujets ne sort qu'en détail : la liste ne sert
+    qu'au tableau de bord."""
+
+    def test_list_omits_content_detail_includes_it(self, tmp_path):
+        db = tmp_path / "content.db"
+        _seed(db, [(701, 80)])
+        client, original = _client(db)
+        try:
+            listing = client.get("/api/projects").json()[0]
+            assert "content" not in listing
+            assert "whitepaper_text" in listing, "utilisé par la couverture"
+            detail = client.get("/api/projects/701").json()
+            assert detail["content"] == "Content for 701"
+        finally:
+            _restore(original)

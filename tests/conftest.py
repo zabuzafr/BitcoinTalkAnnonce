@@ -1,6 +1,8 @@
 import asyncio
+import atexit
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -35,8 +37,31 @@ def _run(coro):
 
 import bitcointalk  # noqa: E402
 
+# Bases creees pour remapper ":memory:" : nettoyees en fin de session.
+_TEMP_DBS: list = []
+
+
+@atexit.register
+def _cleanup_temp_dbs() -> None:
+    for path in _TEMP_DBS:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
 
 def make_analyzer(db_path):
+    """Builds an analyzer on a real file.
+
+    ``:memory:`` is remapped to a temporary file because the analyzer opens a
+    fresh connection per operation; a shared in-memory database would lose the
+    schema between ``init_database`` and the next call.
+    """
+    if str(db_path) == ":memory:":
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db_path = tmp.name
+        _TEMP_DBS.append(tmp.name)
     return bitcointalk.UltimateBitcointalkAnalyzer(db_path=str(db_path), timeout=5)
 
 

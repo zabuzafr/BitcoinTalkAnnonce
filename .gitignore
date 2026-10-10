@@ -3,4 +3,10 @@ __pycache__/
 *.pyc
 *.log
 *.db
+# WAL/SHM et sauvegardes SQLite : artefacts d'exécution, jamais versionnés
+*.db-wal
+*.db-shm
+*.db.bak-*
 crypto_analysis_report.json
+# Configuration LLM : peut contenir une cle API
+llm_config.json

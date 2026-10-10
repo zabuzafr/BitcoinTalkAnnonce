@@ -2,33 +2,52 @@
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 import bitcointalk
+import llm
+import urlclean
 from i18n import DEFAULT_LANG, T, available_languages
 
-DB_PATH = os.environ.get("BT_DB_PATH", str(Path(__file__).parent / "crypto_analysis.db"))
+logger = logging.getLogger(__name__)
 
-app = FastAPI(title="BitcoinTalk Dashboard", version="1.0")
+BASE_DIR = Path(__file__).parent
+STATIC_DIR = BASE_DIR / "static"
+DB_PATH = os.environ.get("BT_DB_PATH", str(BASE_DIR / "crypto_analysis.db"))
+# Migration au démarrage : les endpoints lisent des colonnes v2, et le
+# dashboard ne construit jamais le schéma par lui-même (seul l'analyseur le
+# fait). Sans cela, une base d'une version antérieure casse /api/projects.
+bitcointalk.ensure_schema(DB_PATH)
+DEFAULT_SECTION_ID = int(os.environ.get("BT_BOARD_ID", "159"))
+MAX_SCAN_PAGES = 20
+
+app = FastAPI(title="BitcoinTalk Dashboard", version="2.0")
 
 _scan_lock = asyncio.Lock()
 _scan_init_lock = asyncio.Lock()
 _scan_state: Dict[str, Any] = {
     "status": "idle",
     "scan_id": None,
+    "section_id": None,
     "pages_done": 0,
     "pages_total": 0,
+    "topics_found": 0,
+    "analyzed_count": 0,
+    "skipped_count": 0,
     "started_at": None,
     "finished_at": None,
-    "message": None,
+    "error": None,
 }
 _reanalyze_sem = asyncio.Semaphore(2)
 _reanalyzing: set = set()
@@ -42,6 +61,14 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _col(row: sqlite3.Row, key: str, default: Any = None) -> Any:
+    try:
+        value = row[key]
+    except (IndexError, KeyError):
+        return default
+    return default if value is None else value
+
+
 def _decode_json(value: Any) -> Any:
     if isinstance(value, str):
         try:
@@ -49,6 +76,62 @@ def _decode_json(value: Any) -> Any:
         except (json.JSONDecodeError, TypeError):
             return value
     return value or []
+
+
+_PROJECT_COLUMNS: tuple = (
+    "topic_id", "title", "author", "post_date", "technical_score",
+    "innovation_score", "disruptiveness_score", "credibility_score", "risk_score",
+    "premine_percentage", "is_fork", "fork_base", "mining_algorithm",
+    "consensus_mechanism", "unique_features", "red_flags", "strengths", "final_score",
+    "github_link", "whitepaper_link", "website_link", "analysis_date", "last_updated",
+    "is_promising", "is_active", "quality_level", "innovation_level",
+    "quantum_risk_score", "mining_type", "quality_note", "github_stars",
+    "discord_members", "telegram_members", "hashrate_str", "mining_status",
+    "token_distribution", "team_allocation", "vesting_period", "inflation_model",
+    "burn_mechanisms", "utility_description", "tokenomics_risks", "tokenomics_score",
+    "coingecko_id", "coingecko_symbol", "coingecko_name", "coingecko_price_usd",
+    "coingecko_market_cap_usd", "coingecko_volume_usd", "coingecko_rank",
+    "github_forks", "github_open_issues", "github_language", "github_updated_at",
+    "mining_active_pools", "mining_pool_list", "mining_link", "mining_guide_json",
+    "whitepaper_text",
+    "source_analysis", "social_json",
+)
+
+_SELECT_PROJECT_COLUMNS: str = ", ".join(_PROJECT_COLUMNS)
+
+
+def _stored_link(raw: Any, kind: str) -> str:
+    """Lien stocké, nettoyé à la lecture.
+
+    Les annonces sont du texte brut collé : une ligne peut contenir
+    `…/xCoin⛏️` ou deux URL bout à bout. Corriger l'affichage ne dispense pas
+    de réparer les données, mais l'interface ne doit jamais proposer un lien
+    mort. Un lien inexploitable est masqué plutôt que transmis tel quel.
+    """
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    if kind == "github":
+        return urlclean.canonical_github(value)
+    cleaned = urlclean.clean_url(value)
+    if kind == "website" and cleaned and not urlclean.is_project_site(cleaned):
+        return ""
+    return cleaned
+
+
+def _stored_mining_guide(raw: Any) -> Dict[str, Any]:
+    """Réglages de minage stockés, normalisés pour l'interface.
+
+    Un hôte de piscine n'a pas de schéma : l'interface ne peut pas le rendre
+    cliquable en HTTP, il reste donc du texte à copier dans le mineur.
+    """
+    guide = _decode_json(raw)
+    if not isinstance(guide, dict):
+        return {}
+    normalized = dict(guide)
+    normalized["pool"] = [str(host) for host in guide.get("pool") or [] if host]
+    normalized["stratum"] = [str(item) for item in guide.get("stratum") or [] if item]
+    return normalized if any(normalized.values()) else {}
 
 
 def _row_to_project(row: sqlite3.Row, include_lists: bool = False) -> Dict[str, Any]:
@@ -68,9 +151,9 @@ def _row_to_project(row: sqlite3.Row, include_lists: bool = False) -> Dict[str, 
         "mining_algorithm": row["mining_algorithm"] or "",
         "consensus_mechanism": row["consensus_mechanism"] or "",
         "final_score": row["final_score"],
-        "github_link": row["github_link"] or "",
-        "whitepaper_link": row["whitepaper_link"] or "",
-        "website_link": row["website_link"] or "",
+        "github_link": _stored_link(row["github_link"], "github"),
+        "whitepaper_link": _stored_link(row["whitepaper_link"], "whitepaper"),
+        "website_link": _stored_link(row["website_link"], "website"),
         "analysis_date": row["analysis_date"] or "",
         "last_updated": row["last_updated"] or "",
         "is_promising": bool(row["is_promising"]),
@@ -80,12 +163,43 @@ def _row_to_project(row: sqlite3.Row, include_lists: bool = False) -> Dict[str, 
         "quantum_risk_score": row["quantum_risk_score"] or 0.0,
         "mining_type": row["mining_type"] or "",
         "quality_note": row["quality_note"] or "",
+        "github_stars": _col(row, "github_stars", 0) or 0,
+        "github_forks": _col(row, "github_forks", 0) or 0,
+        "github_open_issues": _col(row, "github_open_issues", 0) or 0,
+        "github_language": _col(row, "github_language", "") or "",
+        "github_updated_at": _col(row, "github_updated_at", "") or "",
+        "discord_members": _col(row, "discord_members", 0) or 0,
+        "telegram_members": _col(row, "telegram_members", 0) or 0,
+        "mining_status": _col(row, "mining_status", "") or "",
+        "hashrate_str": _col(row, "hashrate_str", "") or "",
+        "mining_active_pools": _col(row, "mining_active_pools", 0) or 0,
+        "mining_pool_list": _decode_json(_col(row, "mining_pool_list", "")),
+        "mining_link": _col(row, "mining_link", "") or "",
+        "mining_guide": _stored_mining_guide(_col(row, "mining_guide_json", "")),
+        "coingecko_id": _col(row, "coingecko_id", "") or "",
+        "coingecko_symbol": _col(row, "coingecko_symbol", "") or "",
+        "coingecko_name": _col(row, "coingecko_name", "") or "",
+        "coingecko_price_usd": _col(row, "coingecko_price_usd", None),
+        "coingecko_market_cap_usd": _col(row, "coingecko_market_cap_usd", None),
+        "coingecko_volume_usd": _col(row, "coingecko_volume_usd", None),
+        "coingecko_rank": _col(row, "coingecko_rank", None),
+        "token_distribution": _col(row, "token_distribution", "") or "",
+        "team_allocation": _col(row, "team_allocation", "") or "",
+        "vesting_period": _col(row, "vesting_period", "") or "",
+        "inflation_model": _col(row, "inflation_model", "") or "",
+        "burn_mechanisms": _decode_json(_col(row, "burn_mechanisms", "")),
+        "utility_description": _col(row, "utility_description", "") or "",
+        "tokenomics_risks": _decode_json(_col(row, "tokenomics_risks", "")),
+        "tokenomics_score": _col(row, "tokenomics_score", None),
+        "social_metrics": _decode_json(_col(row, "social_json", "")),
+        "whitepaper_text": _col(row, "whitepaper_text", "") or "",
+        "source_analysis": _decode_json(_col(row, "source_analysis", "")),
     }
     if include_lists:
         data["unique_features"] = _decode_json(row["unique_features"])
         data["red_flags"] = _decode_json(row["red_flags"])
         data["strengths"] = _decode_json(row["strengths"])
-        data["content"] = row["content"] or ""
+        data["content"] = _col(row, "content", "") or ""
     return data
 
 
@@ -110,589 +224,34 @@ def _set_active(topic_id: int, active: bool) -> Optional[int]:
         conn.close()
 
 
-async def _do_reanalyze(topic_id: int) -> None:
+async def _do_reanalyze(topic_id: int, model: Optional[str] = None, llm_config: Optional[Dict[str, Any]] = None) -> None:
     try:
         async with _reanalyze_sem:
-            await asyncio.to_thread(bitcointalk.reanalyze_project, topic_id)
+            config = llm.load_config()
+            if isinstance(llm_config, dict):
+                for key, value in llm_config.items():
+                    if value is not None and key in llm.LLMConfig.__dataclass_fields__:
+                        setattr(config, key, value)
+            if model:
+                config.model = model
+            await asyncio.to_thread(
+                bitcointalk.reanalyze_project, topic_id, model=config.model, llm_config=config
+            )
+    except Exception:
+        logger.exception("reanalyze task failed for topic %s", topic_id)
     finally:
         _reanalyzing.discard(topic_id)
 
 
 @app.get("/")
-def dashboard() -> HTMLResponse:
-    html = """<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BitcoinTalk — Tableau de bord</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #e6edf3; }
-.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-h1 { font-size: 1.8rem; margin-bottom: 20px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-h1 span { color: #f7931a; }
-.lang-select { padding: 6px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.85rem; font-weight: 400; }
-.lang-select:focus { outline: none; border-color: #58a6ff; }
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 30px; }
-.stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
-.stat-card .label { font-size: 0.8rem; color: #8b949e; margin-bottom: 4px; }
-.stat-card .value { font-size: 1.6rem; font-weight: 700; }
-.stat-card .value.good { color: #3fb950; }
-.stat-card .value.bad { color: #f85149; }
-table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
-th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #21262d; }
-th { background: #1c2128; color: #8b949e; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; cursor: pointer; user-select: none; }
-th:hover { color: #e6edf3; }
-tr:last-child td { border-bottom: none; }
-tr { cursor: pointer; }
-tr:hover { background: #1c2128; }
-.score { font-weight: 700; font-size: 1rem; }
-.score.excellent { color: #3fb950; }
-.score.good { color: #d29922; }
-.score.poor { color: #f85149; }
-.score.unanalyzed { color: #8b949e; }
-.badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
-.badge.promising { background: rgba(63,185,80,0.15); color: #3fb950; }
-.badge.fork { background: rgba(139,148,158,0.15); color: #8b949e; }
-.badge.normal { background: rgba(247,147,26,0.15); color: #f7931a; }
-.title-link { color: #58a6ff; text-decoration: none; }
-.title-link:hover { text-decoration: underline; }
-.detail-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 100; justify-content: center; align-items: flex-start; padding: 40px 20px; overflow-y: auto; }
-.detail-overlay.open { display: flex; }
-.detail-content { background: #161b22; border: 1px solid #30363d; border-radius: 8px; max-width: 800px; width: 100%; padding: 24px; }
-.detail-content h2 { font-size: 1.3rem; margin-bottom: 16px; padding-right: 40px; }
-.detail-close { position: absolute; top: 12px; right: 16px; background: none; border: none; color: #8b949e; font-size: 1.5rem; cursor: pointer; }
-.detail-close:hover { color: #e6edf3; }
-.detail-section { margin-bottom: 16px; }
-.detail-section h3 { font-size: 0.9rem; color: #8b949e; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-.detail-section ul { list-style: none; }
-.detail-section li { padding: 4px 0; padding-left: 16px; position: relative; }
-.detail-section li::before { content: '•'; position: absolute; left: 0; color: #8b949e; }
-.detail-section li.flag::before { color: #f85149; }
-.detail-section li.good::before { color: #3fb950; }
-.detail-section li.feature::before { color: #58a6ff; }
-.meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-.meta-item { background: #0d1117; border-radius: 6px; padding: 10px; }
-.meta-item .k { font-size: 0.75rem; color: #8b949e; }
-.meta-item .v { font-size: 0.9rem; font-weight: 600; margin-top: 2px; word-break: break-word; }
-.score-bar { display: flex; gap: 6px; margin-top: 12px; }
-.score-bar .bar { height: 6px; border-radius: 3px; background: #30363d; flex: 1; position: relative; }
-.score-bar .bar .fill { height: 100%; border-radius: 3px; }
-.search { width: 100%; padding: 10px 14px; margin-bottom: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.95rem; }
-.search:focus { outline: none; border-color: #58a6ff; }
-.empty { text-align: center; padding: 40px; color: #8b949e; }
-.empty a { color: #58a6ff; }
-.loading { text-align: center; padding: 40px; color: #8b949e; }
-a.link { color: #58a6ff; text-decoration: none; font-size: 0.85rem; }
-a.link:hover { text-decoration: underline; }
-.detail-links { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
-
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px; }
-.panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }
-.panel h3 { margin: 0 0 10px; font-size: 14px; color: #e6edf3; }
-.ts-chart { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 8px; }
-.ts-bar { flex: 1; background: #58a6ff; border-radius: 3px 3px 0 0; min-height: 2px; position: relative; }
-.ts-bar span { position: absolute; top: -20px; left: 50%; transform: translateX(-50%); font-size: 11px; color: #e6edf3; opacity: 0; }
-.ts-bar:hover span { opacity: 1; }
-.ts-labels { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: #8b949e; }
-.algo-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
-.algo-row .name { width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.algo-bar { flex: 1; height: 10px; background: #21262d; border-radius: 5px; overflow: hidden; }
-.algo-bar .fill { height: 100%; background: #3fb950; }
-.algo-row .pct { width: 48px; text-align: right; color: #8b949e; }
-
-.badge-active { background: #1a3d2a; color: #3fb950; border: 1px solid #2ea043; padding: 1px 8px; border-radius: 10px; font-size: 11px; white-space: nowrap; }
-.badge-inactive { background: #21262d; color: #8b949e; border: 1px solid #484f58; padding: 1px 8px; border-radius: 10px; font-size: 11px; white-space: nowrap; }
-.badge-algo-unknown { background: #21262d; color: #8b949e; border: 1px dashed #484f58; padding: 1px 8px; border-radius: 10px; font-size: 11px; white-space: nowrap; }
-
-.btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 5px 12px; font-size: 13px; cursor: pointer; }
-.btn:hover { border-color: #58a6ff; }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-warn { background: #3a2a00; border-color: #9e6a03; color: #d29922; }
-.btn-warn:hover { border-color: #d29922; }
-.btn-danger { background: #3a1015; border-color: #da3633; color: #f85149; }
-.btn-danger:hover { border-color: #f85149; }
-.action-row { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
-
-.scan-progress { height: 10px; background: #21262d; border-radius: 5px; overflow: hidden; margin: 8px 0; }
-.scan-progress .fill { height: 100%; background: #58a6ff; width: 0%; transition: width 0.3s; }
-.scan-meta { font-size: 12px; color: #8b949e; }
-
-@media (max-width: 900px) {
-  .stats-grid { grid-template-columns: 1fr; }
-  .ts-chart { height: 80px; }
-  .action-row { flex-direction: column; }
-}
-</style>
-</head>
-<body>
-<div class="container">
-  <h1><span class="h1-left">BitcoinTalk — <span data-i18n="dashboard.h1_sub"></span></span>
-  <label data-i18n="dashboard.lang_label">Langue</label> <select id="lang-select" class="lang-select"></select></h1>
-  <div id="stats">
-    <div class="loading" data-i18n="dashboard.loading">Chargement…</div>
-  </div>
-  <div class="stats-grid">
-    <div class="panel ts-panel">
-      <h3 data-i18n="dashboard.ts_title">Activité</h3>
-      <div class="ts-period" style="margin-bottom:8px;display:flex;gap:6px">
-        <button class="btn" data-ts="week" onclick="loadTimeseries('week')" data-i18n="dashboard.ts_week">7j</button>
-        <button class="btn" data-ts="month" onclick="loadTimeseries('month')" data-i18n="dashboard.ts_month">30j</button>
-        <button class="btn" data-ts="year" onclick="loadTimeseries('year')" data-i18n="dashboard.ts_year">12m</button>
-      </div>
-      <div id="ts-chart" class="ts-chart"></div>
-      <div id="ts-labels" class="ts-labels"></div>
-    </div>
-    <div class="panel algo-panel">
-      <h3 data-i18n="dashboard.algo_title">Algorithmes</h3>
-      <div id="algo-list"></div>
-    </div>
-    <div class="panel scan-panel">
-      <h3 data-i18n="dashboard.scan_title">Scan</h3>
-      <div style="display:flex;gap:8px;margin-bottom:8px">
-        <input type="number" id="scan-pages" class="search" min="1" max="100" value="5" style="margin-bottom:0;width:70px">
-        <button class="btn btn-warn" id="btn-scan" onclick="startScan()" data-i18n="dashboard.scan_start">Lancer</button>
-      </div>
-      <div id="scan-section">
-        <div class="scan-progress"><div class="fill" id="scan-fill"></div></div>
-        <div class="scan-meta" id="scan-meta" data-i18n="dashboard.scan_idle">Inactif</div>
-      </div>
-    </div>
-  </div>
-  <input type="text" id="search" class="search" data-i18n-ph="dashboard.search_placeholder" placeholder="Rechercher par titre, auteur, algorithme…">
-  <div id="table-wrap">
-    <div class="loading" data-i18n="dashboard.loading">Chargement…</div>
-  </div>
-</div>
-
-<div class="detail-overlay" id="detail-overlay" onclick="if(event.target===this)closeDetail()">
-  <div class="detail-content" id="detail-content" style="position:relative">
-    <button class="detail-close" onclick="closeDetail()">&times;</button>
-    <div id="detail-body"><div class="loading" data-i18n="dashboard.loading">Chargement…</div></div>
-  </div>
-</div>
-
-<script>
-let allProjects = [];
-let CATALOG = {};
-let LANG = '__DEFAULT_LANG__';
-
-function detectLang() {
-  try {
-    const stored = localStorage.getItem('bt_lang');
-    if (stored && stored.split('-')[0]) return stored.split('-')[0].toLowerCase();
-  } catch (e) {}
-  return '__DEFAULT_LANG__';
-}
-LANG = detectLang();
-
-function t(key) {
-  const parts = key.split('.');
-  let v = CATALOG;
-  for (const p of parts) { v = v && v[p]; }
-  return (v != null) ? String(v) : key;
-}
-
-function tfmt(key, params) {
-  let s = t(key);
-  if (params) {
-    for (const k of Object.keys(params)) s = s.split('{' + k + '}').join(params[k]);
-  }
-  return s;
-}
-
-function applyI18n() {
-  document.querySelectorAll('[data-i18n]').forEach(el => {
-    el.innerHTML = tfmt(el.getAttribute('data-i18n'));
-  });
-  document.querySelectorAll('[data-i18n-ph]').forEach(el => {
-    el.setAttribute('placeholder', t(el.getAttribute('data-i18n-ph')));
-  });
-  const h1sub = document.querySelector('.h1-left');
-  if (h1sub) h1sub.innerHTML = 'BitcoinTalk — <span>' + t('dashboard.h1_sub') + '</span>';
-  const select = document.getElementById('lang-select');
-  if (select) select.value = LANG;
-  document.title = t('dashboard.title');
-  document.documentElement.lang = LANG;
-}
-
-async function fetchJSON(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
-}
-
-async function loadCatalog(lang) {
-  CATALOG = await fetchJSON('/api/i18n/' + lang);
-}
-
-async function loadStats() {
-  try {
-    const s = await fetchJSON('/api/stats');
-    const cards = [
-      { label: t('dashboard.stat_total'), value: s.total_projects, cls: '' },
-      { label: t('dashboard.stat_promising'), value: s.promising_count, cls: 'good' },
-      { label: t('dashboard.stat_avg'), value: (s.avg_final_score != null) ? s.avg_final_score : t('dashboard.list_empty'), cls: '' },
-      { label: t('dashboard.stat_forks'), value: s.fork_count, cls: 'bad' },
-      { label: t('dashboard.stat_max'), value: (s.max_final_score != null) ? s.max_final_score : t('dashboard.list_empty'), cls: 'good' },
-      { label: t('dashboard.stat_last'), value: (s.last_analysis || t('dashboard.list_empty')), cls: '', small: true }
-    ];
-    document.getElementById('stats').innerHTML = cards.map(c =>
-      '<div class="stat-card"><div class="label">' + esc(c.label) + '</div><div class="value ' + c.cls + '"' + (c.small ? ' style="font-size:0.9rem"' : '') + '>' + esc(c.value) + '</div></div>'
-    ).join('');
-  } catch (e) {
-    document.getElementById('stats').innerHTML = '<div class="empty">' + tfmt('dashboard.error_stats', { error: esc(e.message) }) + '</div>';
-  }
-}
-
-function scoreClass(s) {
-  if (s == null) return 'unanalyzed';
-  if (s >= 75) return 'excellent';
-  if (s >= 50) return 'good';
-  return 'poor';
-}
-
-function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s == null ? '' : String(s);
-  return d.innerHTML;
-}
-
-function renderTable(projects) {
-  const wrap = document.getElementById('table-wrap');
-  if (!projects.length) {
-    wrap.innerHTML = '<div class="empty">' + t('dashboard.empty_projects') + '</div>';
-    return;
-  }
-  let rows = projects.map(p => {
-    const link = p.topic_id ? 'https://bitcointalk.org/index.php?topic=' + p.topic_id : '';
-    const meta = '<div class="meta-item"><div class="k">' +
-      t('dashboard.score_tech') + ' ' + esc(p.technical_score != null ? p.technical_score : '—') + ' / ' +
-      t('dashboard.score_inno') + ' ' + esc(p.innovation_score != null ? p.innovation_score : '—') + ' / ' +
-      t('dashboard.score_disp') + ' ' + esc(p.disruptiveness_score != null ? p.disruptiveness_score : '—') + ' / ' +
-      t('dashboard.score_cred') + ' ' + esc(p.credibility_score != null ? p.credibility_score : '—') +
-      '</div></div>';
-    const type = p.is_fork
-      ? '<span class="badge fork">' + tfmt('dashboard.badge_fork', { base: esc(p.fork_base || '?') }) + '</span>'
-      : '<span class="badge normal">' + t('dashboard.badge_native') + '</span>';
-    const status = p.is_promising ? '<span class="badge promising">' + t('dashboard.badge_promising') + '</span>' : '';
-    return '<tr onclick="openDetail(' + p.topic_id + ')">' +
-      '<td><a class="title-link" href="' + link + '" target="_blank" onclick="event.stopPropagation()">' + esc(p.title || '—') + '</a></td>' +
-      '<td>' + esc(p.author || '—') + '</td>' +
-      '<td>' + meta + '</td>' +
-      '<td><span class="score ' + scoreClass(p.final_score) + '">' + esc(p.final_score != null ? p.final_score : '—') + '</span></td>' +
-      '<td>' + type + '</td>' +
-      '<td>' + status + '</td>' +
-      '<td>' + renderActivityBadge(p) + '</td>' +
-      '<td>' + actButtons(p) + '</td>' +
-      '</tr>';
-  }).join('');
-  wrap.innerHTML = '<table><thead><tr>' +
-    '<th data-key="title">' + t('dashboard.col_title') + '</th>' +
-    '<th data-key="author">' + t('dashboard.col_author') + '</th>' +
-    '<th>' + t('dashboard.col_scores') + '</th>' +
-    '<th data-key="final_score" class="score-col">' + t('dashboard.col_score') + '</th>' +
-    '<th>' + t('dashboard.col_type') + '</th>' +
-    '<th>' + t('dashboard.col_status') + '</th>' +
-    '<th>' + t('dashboard.col_activity') + '</th>' +
-    '<th>' + t('dashboard.col_actions') + '</th>' +
-    '</tr></thead><tbody>' + rows + '</tbody></table>';
-  document.querySelectorAll('th[data-key]').forEach(th => {
-    th.addEventListener('click', () => sortTable(th.dataset.key, th));
-  });
-}
-
-let sortState = { key: null, dir: -1 };
-function sortTable(key, th) {
-  if (sortState.key === key) sortState.dir *= -1;
-  else { sortState.key = key; sortState.dir = 1; }
-  allProjects.sort((a, b) => {
-    let va = a[key], vb = b[key];
-    if (typeof va === 'string') va = va.toLowerCase();
-    if (typeof vb === 'string') vb = vb.toLowerCase();
-    if (va == null) va = '';
-    if (vb == null) vb = '';
-    if (va < vb) return -1 * sortState.dir;
-    if (va > vb) return 1 * sortState.dir;
-    return 0;
-  });
-  renderTable(allProjects);
-}
-
-async function openDetail(topicId) {
-  const body = document.getElementById('detail-body');
-  body.innerHTML = '<div class="loading">' + t('dashboard.loading') + '</div>';
-  document.getElementById('detail-overlay').classList.add('open');
-  try {
-    const p = await fetchJSON('/api/projects/' + topicId);
-    const dash = t('dashboard.list_empty');
-    const list = (arr, cls) => (arr && arr.length)
-      ? '<ul>' + arr.map(x => '<li class="' + cls + '">' + esc(x) + '</li>').join('') + '</ul>'
-      : '<li style="color:#8b949e">' + dash + '</li>';
-    const bar = (label, val) => {
-      const v = Math.max(0, Math.min(100, Number(val) || 0));
-      const color = v >= 75 ? '#3fb950' : v >= 50 ? '#d29922' : '#f85149';
-      return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:110px;font-size:0.8rem;color:#8b949e">' + label + '</div><div class="bar" style="flex:1"><div class="fill" style="width:' + v + '%;background:' + color + '"></div></div><div style="font-size:0.8rem;font-weight:700;width:30px;text-align:right">' + v + '</div></div>';
-    };
-    const links = [];
-    if (p.github_link) links.push('<a class="link" href="' + esc(p.github_link) + '" target="_blank">GitHub</a>');
-    if (p.whitepaper_link) links.push('<a class="link" href="' + esc(p.whitepaper_link) + '" target="_blank">Whitepaper</a>');
-    if (p.website_link) links.push('<a class="link" href="' + esc(p.website_link) + '" target="_blank">' + t('dashboard.detail_links').split(' ')[0] + '</a>');
-    if (p.topic_id) links.push('<a class="link" href="https://bitcointalk.org/index.php?topic=' + p.topic_id + '" target="_blank">Bitcointalk</a>');
-    const forkVal = p.is_fork ? tfmt('dashboard.detail_fork_yes', { base: esc(p.fork_base || '?') }) : t('dashboard.detail_fork_no');
-    const premineVal = (p.premine_percentage != null) ? esc(p.premine_percentage) + '%' : dash;
-
-    body.innerHTML = '' +
-      '<h2>' + esc(p.title || dash) + '</h2>' +
-      '<div class="detail-section">' +
-      '  <div style="display:flex;justify-content:space-between;align-items:baseline">' +
-      '    <span class="k" style="color:#8b949e;font-size:0.9rem">' + t('dashboard.detail_score_final') + '</span>' +
-      '    <span class="score ' + scoreClass(p.final_score) + '" style="font-size:2rem">' + esc(p.final_score != null ? p.final_score : dash) + '</span>' +
-      '  </div>' +
-      '  <div style="margin-top:12px">' + bar(t('dashboard.detail_bar_tech'), p.technical_score) + bar(t('dashboard.detail_bar_inno'), p.innovation_score) + bar(t('dashboard.detail_bar_disp'), p.disruptiveness_score) + bar(t('dashboard.detail_bar_cred'), p.credibility_score) + '</div>' +
-      '</div>' +
-      '<div class="detail-section"><h3>' + t('dashboard.detail_info') + '</h3><div class="meta-grid">' +
-      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_author') + '</div><div class="v">' + esc(p.author || dash) + '</div></div>' +
-      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_date') + '</div><div class="v">' + esc(p.post_date || dash) + '</div></div>' +
-      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_algo') + '</div><div class="v">' + esc(p.mining_algorithm || dash) + '</div></div>' +
-      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_consensus') + '</div><div class="v">' + esc(p.consensus_mechanism || dash) + '</div></div>' +
-      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_premine') + '</div><div class="v">' + premineVal + '</div></div>' +
-      '  <div class="meta-item"><div class="k">' + t('dashboard.detail_fork') + '</div><div class="v">' + forkVal + '</div></div>' +
-      '</div></div>' +
-      (links.length ? '<div class="detail-section"><h3>' + t('dashboard.detail_links') + '</h3><div class="detail-links">' + links.join('') + '</div></div>' : '') +
-      '<div class="detail-section"><h3>' + t('dashboard.detail_strengths') + '</h3>' + list(p.strengths, 'good') + '</div>' +
-      '<div class="detail-section"><h3>' + t('dashboard.detail_features') + '</h3>' + list(p.unique_features, 'feature') + '</div>' +
-      '<div class="detail-section"><h3>' + t('dashboard.detail_flags') + '</h3>' + list(p.red_flags, 'flag') + '</div>' +
-      '<div class="detail-section"><h3>' + t('dashboard.detail_content') + '</h3><p style="white-space:pre-wrap;font-size:0.85rem;color:#8b949e">' + esc(p.content || '') + '</p></div>' +
-       '<div class="detail-section">' +
-       '  <div style="font-size:0.8rem;color:#8b949e">' + tfmt('dashboard.detail_analyzed', { date: esc(p.analysis_date || dash) }) + '</div>' +
-       '  <div id="hist-' + p.topic_id + '" style="margin-top:8px"><div class="loading" style="padding:8px">' + t('dashboard.detail_history') + '</div></div>' +
-       '</div>' +
-       '<div class="detail-section">' + actButtons(p) + '</div>';
-    fetchJSON('/api/history/' + p.topic_id).then(h => {
-      const el = document.getElementById('hist-' + p.topic_id);
-      if (el) el.innerHTML = h.length
-        ? '<ul>' + h.map(x => '<li>' + esc(x.analysis_date) + ' — <span class="score ' + scoreClass(x.score) + '">' + esc(x.score) + '</span>' + (x.notes ? ' — ' + esc(x.notes) : '') + '</li>').join('') + '</ul>'
-        : '<li style="color:#8b949e">' + t('dashboard.detail_no_history') + '</li>';
-    }).catch(() => {});
-  } catch (e) {
-    body.innerHTML = '<div class="empty">' + tfmt('dashboard.error_detail', { error: esc(e.message) }) + '</div>';
-  }
-}
-
-function closeDetail() {
-  document.getElementById('detail-overlay').classList.remove('open');
-}
-
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetail(); });
-
-document.getElementById('search').addEventListener('input', function() {
-  const q = this.value.toLowerCase();
-  if (!q) { renderTable(allProjects); return; }
-  renderTable(allProjects.filter(p =>
-    (p.title || '').toLowerCase().includes(q) ||
-    (p.author || '').toLowerCase().includes(q) ||
-    (p.mining_algorithm || '').toLowerCase().includes(q) ||
-    (p.consensus_mechanism || '').toLowerCase().includes(q)
-  ));
-});
-
-async function populateLangSelect() {
-  const select = document.getElementById('lang-select');
-  let langs = [];
-  try {
-    langs = await fetchJSON('/api/i18n/languages');
-  } catch (e) {
-    langs = [{ code: '__DEFAULT_LANG__', name: 'Français' }, { code: 'en', name: 'English' }];
-  }
-  select.innerHTML = langs.map(l => '<option value="' + l.code + '"' + (l.code === LANG ? ' selected' : '') + '>' + esc(l.name) + '</option>').join('');
-}
-
-async function switchLanguage(lang) {
-  LANG = lang;
-  try {
-    localStorage.setItem('bt_lang', lang);
-  } catch (e) {}
-  await loadCatalog(lang);
-  applyI18n();
-  await loadStats();
-  renderTable(allProjects);
-}
-
-function renderActivityBadge(p) {
-  if (p.is_active === false) return '<span class="badge-inactive">' + t('dashboard.badge_inactive') + '</span>';
-  return '<span class="badge-active">' + t('dashboard.badge_active') + '</span>';
-}
-
-function actButtons(p) {
-  const disabled = p.is_active === false;
-  const busy = p._busy === true;
-  const actDis = disabled ? '' : '<button class="btn" data-topic="' + p.topic_id + '" data-act="disable" ' + (busy ? 'disabled ' : '') + 'onclick="event.stopPropagation();actCall(' + p.topic_id + ',&#39;disable&#39;)">' + t('dashboard.act_disable') + '</button>';
-  const actEn = disabled ? '<button class="btn" data-topic="' + p.topic_id + '" data-act="enable" ' + (busy ? 'disabled ' : '') + 'onclick="event.stopPropagation();actCall(' + p.topic_id + ',&#39;enable&#39;)">' + t('dashboard.act_enable') + '</button>' : '';
-  const actAn = busy ? '' : '<button class="btn" data-topic="' + p.topic_id + '" data-act="reanalyze" onclick="event.stopPropagation();actCall(' + p.topic_id + ',&#39;reanalyze&#39;)">' + t('dashboard.act_reanalyze') + '</button>';
-  return '<div class="action-row">' + actDis + actEn + actAn + '</div>';
-}
-
-function patchLocal(topicId, patch) {
-  const idx = allProjects.findIndex(p => p.topic_id === topicId);
-  if (idx >= 0) Object.assign(allProjects[idx], patch);
-}
-
-async function actCall(topicId, action) {
-  patchLocal(topicId, { _busy: true });
-  renderTable(allProjects);
-  try {
-    const path = action === 'reanalyze'
-      ? '/api/projects/' + topicId + '/analyze'
-      : '/api/projects/' + topicId + '/' + action;
-    const r = await fetchJSON(path, { method: 'POST' });
-    if (action === 'reanalyze') {
-      patchLocal(topicId, { _busy: false });
-      toast(t('dashboard.act_queued'));
-    } else {
-      const isActive = action === 'enable';
-      patchLocal(topicId, { is_active: isActive, _busy: false });
-      toast(t(isActive ? 'dashboard.act_enabled' : 'dashboard.act_disabled'));
-    }
-    renderTable(allProjects);
-    loadStats();
-    const ov = document.getElementById('detail-overlay');
-    if (ov && ov.classList.contains('open')) openDetail(topicId);
-  } catch (e) {
-    patchLocal(topicId, { _busy: false });
-    renderTable(allProjects);
-    if (String(e.message).includes('409')) toast(t('dashboard.error_busy'), true);
-    else if (String(e.message).includes('503')) toast(t('dashboard.error_down'), true);
-    else toast(e.message, true);
-  }
-}
-
-function toast(msg, isError) {
-  let el = document.getElementById('toast');
-  if (!el) { el = document.createElement('div'); el.id = 'toast'; document.body.appendChild(el); }
-  el.textContent = msg;
-  el.style.display = 'block';
-  el.style.color = isError ? '#f85149' : '#3fb950';
-  clearTimeout(el._t);
-  el._t = setTimeout(() => { el.style.display = 'none'; }, 3000);
-}
-
-function renderScan(state) {
-  const fill = document.getElementById('scan-fill');
-  const meta = document.getElementById('scan-meta');
-  if (!fill) return;
-  if (state.status === 'running') {
-    const pct = state.pages_done != null && state.total_pages != null
-      ? Math.round((state.pages_done / state.total_pages) * 100) : 0;
-    fill.style.width = pct + '%';
-    meta.textContent = t('dashboard.scan_running') + ' ' + t('dashboard.scan_pages').replace('{done}', state.pages_done ?? '?').replace('{total}', state.total_pages ?? '?');
-  } else if (state.status === 'done') {
-    fill.style.width = '100%';
-    meta.textContent = t('dashboard.scan_done') + ' — ' + t('dashboard.scan_found').replace('{n}', state.new_projects ?? 0);
-  } else if (state.status === 'failed') {
-    fill.style.width = '0%';
-    meta.textContent = t('dashboard.scan_failed') + (state.error ? ' — ' + state.error : '');
-  } else {
-    fill.style.width = '0%';
-    meta.textContent = t('dashboard.scan_idle');
-  }
-}
-
-async function pollScan(scanId) {
-  const tick = async () => {
-    let state;
-    try { state = await fetchJSON('/api/scan/status'); } catch (e) { return; }
-    renderScan(state);
-    if (state.status === 'running') { pollScan._timer = setTimeout(tick, 2000); }
-    else if (state.status === 'done') { await loadTimeseries(currentTsPeriod); loadAlgo(currentAlgoTop); loadStats(); }
-  };
-  await tick();
-}
-
-async function startScan() {
-  const btn = document.getElementById('btn-scan');
-  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
-  try {
-    const r = await fetchJSON('/api/scan', { method: 'POST' });
-    pollScan(r.scan_id);
-  } catch (e) {
-    if (String(e.message).includes('202') || String(e.message).includes('409')) {
-      const state = await fetchJSON('/api/scan/status').catch(() => null);
-      if (state) renderScan(state);
-    } else {
-      toast(t('dashboard.scan_failed') + ' — ' + e.message, true);
-    }
-  } finally {
-    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
-  }
-}
-
-let currentTsPeriod = 'week';
-let currentAlgoTop = 10;
-
-async function loadTimeseries(period) {
-  currentTsPeriod = period;
-  const el = document.getElementById('ts-chart');
-  const labels = document.getElementById('ts-labels');
-  if (!el) return;
-  try {
-    const data = await fetchJSON('/api/stats/timeseries?period=' + period + '&include_inactive=0');
-    const buckets = data.buckets || [];
-    const vals = buckets.map(b => b.count || 0);
-    const max = Math.max(...vals, 1);
-    el.innerHTML = buckets.map((b, i) =>
-      '<div class="ts-bar-wrap"><div class="ts-bar" style="height:' + Math.round((vals[i] / max) * 100) + '%" title="' + esc(b.label) + ': ' + vals[i] + '"></div></div>'
-    ).join('');
-    if (labels) labels.innerHTML = buckets.map(b => '<span class="ts-label">' + esc(b.label) + '</span>').join('');
-  } catch (e) {
-    el.innerHTML = '<div class="empty" style="padding:12px">' + esc(e.message) + '</div>';
-  }
-}
-
-async function loadAlgo(top) {
-  currentAlgoTop = top;
-  const el = document.getElementById('algo-list');
-  if (!el) return;
-  try {
-    const data = await fetchJSON('/api/stats/by_algorithm?top=' + top + '&include_inactive=0');
-    const total = data.total || 0;
-    el.innerHTML = '<div style="font-size:0.8rem;color:#8b949e;margin-bottom:8px">' + t('dashboard.algo_total').replace('{n}', total) + '</div>' +
-      (data.algorithms || []).map(a => {
-        const label = a.algorithm === 'unknown' || !a.algorithm
-          ? t('dashboard.algo_unknown') : esc(a.algorithm);
-        const pct = a.pct != null ? a.pct : (total ? Math.round((a.count / total) * 100) : 0);
-        return '<div class="algo-row"><span class="algo-label">' + label + '</span>' +
-          '<div class="algo-bar"><div class="fill" style="width:' + pct + '%"></div></div>' +
-          '<span class="algo-count">' + a.count + '</span></div>';
-      }).join('');
-  } catch (e) {
-    el.innerHTML = '<div class="empty" style="padding:12px">' + esc(e.message) + '</div>';
-  }
-}
-
-(async function init() {
-  await populateLangSelect();
-  await loadCatalog(LANG);
-  applyI18n();
-  await loadStats();
-  try {
-    allProjects = await fetchJSON('/api/projects');
-    allProjects.sort((a, b) => (b.final_score ?? 0) - (a.final_score ?? 0));
-  } catch (e) {
-    allProjects = [];
-  }
-  renderTable(allProjects);
-  await loadTimeseries('month');
-  await loadAlgo(10);
-  const select = document.getElementById('lang-select');
-  if (select) select.addEventListener('change', () => switchLanguage(select.value));
-})();
-</script>
-</body>
-</html>
-""".replace("__DEFAULT_LANG__", DEFAULT_LANG)
+def dashboard() -> FileResponse:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace("__DEFAULT_LANG__", DEFAULT_LANG)
+    html = html.replace("__DEFAULT_SECTION__", str(DEFAULT_SECTION_ID))
     return HTMLResponse(html)
+
+
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/api/i18n/languages")
@@ -771,10 +330,7 @@ def api_projects(
         params.extend([like, like])
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = (
-        "SELECT topic_id, title, author, post_date, technical_score, innovation_score, "
-        "disruptiveness_score, credibility_score, risk_score, premine_percentage, is_fork, "
-        "fork_base, mining_algorithm, consensus_mechanism, final_score, github_link, "
-        "whitepaper_link, website_link, analysis_date, last_updated, is_promising, is_active "
+        f"SELECT {_SELECT_PROJECT_COLUMNS} "
         f"FROM projects{where} ORDER BY final_score DESC NULLS LAST, analysis_date DESC"
     )
     with _connect() as conn:
@@ -795,17 +351,11 @@ def api_promising(
     if not path.exists():
         return []
 
-    active_clauses: List[str] = [
-        "p.quality_level IS NOT NULL",
-        "p.innovation_level IS NOT NULL",
-        "p.status NOT IN ('spam', 'abandoned', 'dead')",
-    ]
-    inactive_clauses: List[str] = [
-        "p.quality_level IS NOT NULL",
-        "p.innovation_level IS NOT NULL",
-    ]
+    active_clauses: List[str] = ["p.is_active = 1", "p.is_promising = 1"]
+    inactive_clauses: List[str] = ["p.is_promising = 1"]
 
-    where = f" WHERE {' AND '.join(active_clauses)}"
+    clauses = inactive_clauses if include_inactive else active_clauses
+    where = f" WHERE {' AND '.join(clauses)}"
 
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
@@ -813,7 +363,7 @@ def api_promising(
             f"SELECT * FROM ("
             f"  SELECT p.*, ROW_NUMBER() OVER (ORDER BY COALESCE(p.final_score, 0) DESC, p.analysis_date DESC) AS rank_num "
             f"  FROM projects p{where}"
-            f") WHERE rank_num <= ? ORDER BY rank ASC"
+            f") WHERE rank_num <= ? ORDER BY rank_num ASC"
         )
         cur = conn.execute(rank_sql, (limit,))
         rows = cur.fetchall()
@@ -858,11 +408,7 @@ def api_project_detail(request: Request, topic_id: int) -> Dict[str, Any]:
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.execute(
-            "SELECT topic_id, title, author, post_date, content, technical_score, innovation_score, "
-            "disruptiveness_score, credibility_score, risk_score, premine_percentage, is_fork, "
-            "fork_base, mining_algorithm, consensus_mechanism, unique_features, red_flags, "
-            "strengths, final_score, github_link, whitepaper_link, website_link, analysis_date, "
-            "last_updated, is_promising, is_active FROM projects WHERE topic_id = ?",
+            f"SELECT {_SELECT_PROJECT_COLUMNS}, content FROM projects WHERE topic_id = ?",
             (topic_id,)
         )
         row = cur.fetchone()
@@ -914,14 +460,22 @@ def api_project_enable(request: Request, topic_id: int) -> Dict[str, Any]:
     return {"id": result, "status": "enabled"}
 
 
-def _ollama_available() -> bool:
-    try:
-        import ollama
+def _llm_available() -> tuple[bool, Optional[str]]:
+    """Le fournisseur configure est-il joignable ?
 
-        ollama.list()
-        return True
-    except Exception:
-        return False
+    Le test porte sur le fournisseur réellement configuré : exiger Ollama
+    empêcherait toute ré-analyse chez qui utilise une API compatible ChatGPT.
+    Le retour est `(joignable, detail)` ; `detail` n'est jamais journalisée avec
+    une clé, le client de `llm` ne la place pas dans ses messages d'erreur.
+    """
+    config = llm.load_config()
+    try:
+        llm.ChatClient(config).probe_sync()
+    except llm.LLMError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        return False, str(exc)[:200]
+    return True, None
 
 
 @app.post("/api/projects/{topic_id}/analyze")
@@ -935,8 +489,11 @@ async def api_project_analyze(request: Request, topic_id: int) -> Dict[str, Any]
         raise HTTPException(status_code=404, detail=_t(request, "api.project_not_found"))
     if topic_id in _reanalyzing:
         raise HTTPException(status_code=409, detail="analyzing")
-    if not _ollama_available():
-        raise HTTPException(status_code=503, detail="ollama_unavailable")
+    # Transport bloquant : hors de la boucle, sinon /api/scan/status et le
+    # reste du dashboard gelent le temps de la sonde (jusqu'à 15 s).
+    available, detail = await asyncio.to_thread(_llm_available)
+    if not available:
+        raise HTTPException(status_code=503, detail="llm_unavailable")
     asyncio.create_task(_do_reanalyze(topic_id))
     return {"topic_id": topic_id, "status": "queued"}
 
@@ -1021,50 +578,276 @@ def api_stats_by_algorithm(top: int = 10, include_inactive: int = 0) -> Dict[str
 
 
 @app.post("/api/scan")
-async def api_scan_scan(request: Request, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def api_scan_scan(request: Request, body: Optional[Dict[str, Any]] = None) -> JSONResponse:
     body = body or {}
-    section_id = int(body.get("section_id", 64))
-    pages = int(body.get("pages", 5))
+    section_id = int(body.get("section_id", DEFAULT_SECTION_ID))
+    pages = max(1, min(int(body.get("pages", 5)), MAX_SCAN_PAGES))
     async with _scan_init_lock:
         if _scan_state["status"] == "running":
-            return {"scan_id": _scan_state["scan_id"], "status": "running"}
+            return JSONResponse(
+                {"scan_id": _scan_state["scan_id"], "status": "running"}, status_code=202
+            )
         scan_id = uuid.uuid4().hex
         _scan_state.update(
             status="running",
             scan_id=scan_id,
+            section_id=section_id,
             pages_done=0,
             pages_total=pages,
+            topics_found=0,
+            analyzed_count=0,
+            skipped_count=0,
             started_at=datetime.now().isoformat(),
             finished_at=None,
-            message=None,
+            error=None,
         )
     asyncio.create_task(_run_scan(scan_id, section_id, pages))
-    return {"scan_id": scan_id, "status": "running"}
+    return JSONResponse({"scan_id": scan_id, "status": "running"}, status_code=202)
 
 
 @app.get("/api/scan/status")
-def api_scan_status() -> Dict[str, Any]:
-    return dict(_scan_state)
+def api_scan_status() -> JSONResponse:
+    return JSONResponse(dict(_scan_state))
 
 
 async def _run_scan(scan_id: str, section_id: int, pages: int) -> None:
     async with _scan_lock:
         try:
             analyzer = bitcointalk.UltimateBitcointalkAnalyzer(db_path=DB_PATH, timeout=30)
-            async with _scan_init_lock:
-                if _scan_state["scan_id"] == scan_id:
-                    _scan_state["message"] = "scanning"
-            await analyzer.scan_bitcointalk_section(section_id, pages)
-            async with _scan_init_lock:
-                if _scan_state["scan_id"] == scan_id:
-                    _scan_state.update(status="done", pages_done=pages, finished_at=datetime.now().isoformat())
+
+            def _on_progress(event: Dict[str, Any]) -> None:
+                if _scan_state.get("scan_id") == scan_id:
+                    _scan_state.update({k: v for k, v in event.items() if k in _scan_state})
+
+            await analyzer.scan_bitcointalk_section(section_id, pages, progress_cb=_on_progress)
+            if _scan_state.get("scan_id") == scan_id:
+                _scan_state.update(
+                    status="done", pages_done=pages, finished_at=datetime.now().isoformat()
+                )
         except Exception as exc:
-            async with _scan_init_lock:
-                if _scan_state["scan_id"] == scan_id:
-                    _scan_state.update(status="error", message=str(exc), finished_at=datetime.now().isoformat())
+            logger.exception("scan failed")
+            if _scan_state.get("scan_id") == scan_id:
+                _scan_state.update(
+                    status="error", error=str(exc), finished_at=datetime.now().isoformat()
+                )
+
+
+def llm_env_overrides() -> list[str]:
+    """Variables d'environnement qui priment sur le fichier de configuration."""
+    return sorted(name for name in llm.ENV_KEYS.values() if os.environ.get(name))
+
+
+@app.get("/api/llm/config")
+def api_llm_config_get() -> JSONResponse:
+    """Configuration effective. La cle API n'est jamais renvoyee en clair."""
+    config = llm.load_config()
+    payload = config.masked()
+    payload["providers"] = list(llm.PROVIDERS)
+    payload["config_path"] = str(llm.config_path())
+    payload["env_overrides"] = llm_env_overrides()
+    return JSONResponse(payload)
+
+
+@app.post("/api/llm/config")
+def api_llm_config_set(body: Dict[str, Any]) -> JSONResponse:
+    """Enregistre la configuration. Une cle API vide ou `__KEEP__` la conserve."""
+    current = llm.load_config()
+    provider = str(body.get("provider", current.provider)).strip().lower()
+    model = str(body.get("model", current.model)).strip()
+
+    candidate = llm.LLMConfig(
+        provider=provider,
+        model=model,
+        ollama_host=str(body.get("ollama_host", current.ollama_host)).strip(),
+        api_base=str(body.get("api_base", current.api_base)).strip(),
+        temperature=body.get("temperature", current.temperature),
+        timeout=body.get("timeout", current.timeout),
+    )
+    # Le champ est vide quand l'utilisateur n'en saisit pas : dans ce cas, comme
+    # avec la sentinelle __KEEP__, la cle deja enregistree est conservee. Sans
+    # cela, réenregistrer un formulaire depuis un navigateur sans gestionnaire
+    # de mots de passe effacerait silencieusement la cle. Changer d'URL de base
+    # detachet la cle : elle reste rattachee a l'hote pour lequel elle a ete
+    # enregistree.
+    candidate.api_key = _resolve_probe_key(
+        body.get("api_key"), current.api_key, current.api_base, candidate.api_base
+    )
+
+    try:
+        candidate.validate()
+    except llm.LLMError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # Toute variable d'environnement prioritaire rendrait l'ecriture inoperante :
+    # le fichier serait ecrase puis immediatement ignore au rechargement.
+    locked = llm_env_overrides()
+    if locked:
+        return JSONResponse(
+            {"error": T.t("llm.err_env_locked", names=", ".join(locked))},
+            status_code=409,
+        )
+
+    try:
+        llm.save_config(candidate)
+    except OSError as exc:
+        logger.exception("cannot persist llm config")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse(candidate.masked())
+
+
+def _base_id(url: str) -> tuple:
+    """Identifiant normalisé d'une URL de base, pour comparer deux cibles."""
+    parsed = urlparse(str(url).strip())
+    return (parsed.scheme.lower(), (parsed.hostname or "").lower(),
+            parsed.port or "", parsed.path.rstrip("/"))
+
+
+def _resolve_probe_key(supplied: Any, current: str,
+                       current_base: str, target_base: str) -> str:
+    """Cle à joindre pour une URL de base donnée.
+
+    Champ vide ou sentinelle : la cle enregistrée n'est transmise qu'à l'URL de
+    base à laquelle elle est rattachée. Un appelant qui change `api_base`
+    (aperçu avant enregistrement, requête tierce) doit fournir la cle
+    correspondante — sans quoi un serveur choisi par l'appelant recevrait le
+    secret enregistré, jeton d'autorisation compris.
+    """
+    if supplied is not None:
+        key = str(supplied).strip()
+        if key and key != llm.KEY_KEEP:
+            return key
+    if _base_id(current_base) == _base_id(target_base):
+        return current
+    return ""
+
+
+def _llm_candidate(body: Dict[str, Any]) -> llm.LLMConfig:
+    """Configuration correspondant aux champs soumis, completee par l'enregistrement.
+
+    `validate()` n'est pas appele : lister des modeles ne demande ni un nom de
+    modele ni une cle. Invalider ici bloquerait la selection avant que
+    l'utilisateur ait choisi quoi que ce soit.
+    """
+    current = llm.load_config()
+    provider = str(body.get("provider") or current.provider).strip().lower()
+    if provider not in llm.PROVIDERS:
+        raise llm.LLMError(T.t("llm.err_provider", value=provider,
+                               allowed="/".join(llm.PROVIDERS)))
+    ollama_host = str(body.get("ollama_host") or current.ollama_host).strip()
+    api_base = str(body.get("api_base") or current.api_base).strip()
+    # validate() n'est pas appele (voir docstring) : la cible est quand meme
+    # verifiee, ne serait-ce que pour refuser une IP de metadonnees cloud.
+    if provider == "ollama" and ollama_host:
+        llm.check_target(ollama_host, field="ollama_host")
+    elif provider == "openai" and api_base:
+        llm.check_target(api_base, field="api_base")
+    return llm.LLMConfig(
+        provider=provider,
+        model=str(body.get("model") or current.model),
+        ollama_host=ollama_host,
+        api_base=api_base,
+        api_key=_resolve_probe_key(body.get("api_key"), current.api_key,
+                                   current.api_base, api_base),
+        temperature=body.get("temperature", current.temperature),
+        timeout=body.get("timeout", current.timeout),
+    )
+
+
+@app.post("/api/llm/models")
+async def api_llm_models(body: Optional[Dict[str, Any]] = None) -> JSONResponse:
+    """Modeles disponibles sur le fournisseur demande.
+
+    Le panneau doit proposer les modeles reellement installes sur la machine,
+    pas une liste figee : c'est ce qui permet de choisir un modele avant de
+    lancer un scan. Le corps est optionnel et sert a sonder des champs non
+    encore enregistres (apercu avant enregistrement, bascule de fournisseur).
+
+    Un fournisseur injoignable donne une liste vide et un message, jamais une
+    erreur 500 : le panneau doit rester utilisable pendant qu'un serveur
+    demarre.
+    """
+    try:
+        config = _llm_candidate(body or {})
+    except llm.LLMError as exc:
+        return JSONResponse({"models": [], "error": str(exc)}, status_code=200)
+    try:
+        listing = await llm.list_models_detailed(config)
+    except llm.LLMError as exc:
+        return JSONResponse({"models": [], "error": str(exc)}, status_code=200)
+    return JSONResponse(listing)
+
+
+@app.get("/api/models")
+async def api_models() -> JSONResponse:
+    """Retourne la liste des modèles disponibles pour l'analyse."""
+    config = llm.load_config()
+    listing = await llm.list_models_detailed(config)
+    return JSONResponse(listing)
+
+
+@app.post("/api/llm/test")
+async def api_llm_test(body: Optional[Dict[str, Any]] = None) -> JSONResponse:
+    """Teste la joignabilite du fournisseur sans enregistrer quoi que ce soit."""
+    body = body or {}
+    config = llm.load_config()
+    if body.get("provider") or body.get("model") or body.get("ollama_host") or body.get("api_base"):
+        target_base = str(body.get("api_base", config.api_base)).strip()
+        candidate = llm.LLMConfig(
+            provider=str(body.get("provider", config.provider)),
+            model=str(body.get("model", config.model)),
+            ollama_host=str(body.get("ollama_host", config.ollama_host)),
+            api_base=target_base,
+            api_key=_resolve_probe_key(body.get("api_key"), config.api_key,
+                                       config.api_base, target_base),
+            temperature=body.get("temperature", config.temperature),
+            timeout=body.get("timeout", config.timeout),
+        )
+        try:
+            candidate.validate()
+        except llm.LLMError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        config = candidate
+
+    client = llm.ChatClient(config)
+    try:
+        result = await client.probe()
+    except llm.LLMError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=200)
+    result["provider"] = config.provider
+    result["model"] = config.model
+    return JSONResponse(result)
+
+
+@app.post("/api/reanalyze/{topic_id}")
+async def api_reanalyze(topic_id: int, body: Optional[Dict[str, Any]] = None) -> JSONResponse:
+    """Déclenche une réanalyse pour un projet spécifique.
+    
+    Le corps optionnel peut contenir:
+    - model: le modèle à utiliser pour l'analyse
+    - llm_config: configuration LLM personnalisée
+    """
+    if topic_id in _reanalyzing:
+        raise HTTPException(status_code=409, detail=T.t("errors.reanalysis_in_progress", topic_id=topic_id))
+
+    # Transport bloquant : hors de la boucle, sinon /api/scan/status et le
+    # reste du dashboard gelent le temps de la sonde (jusqu'à 15 s).
+    available, detail = await asyncio.to_thread(_llm_available)
+    if not available:
+        raise HTTPException(status_code=503, detail="llm_unavailable")
+
+    _reanalyzing.add(topic_id)
+    body = body or {}
+    asyncio.create_task(
+        _do_reanalyze(topic_id, model=body.get("model"), llm_config=body.get("llm_config"))
+    )
+    return JSONResponse({"ok": True, "topic_id": topic_id})
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=os.environ.get("BT_DASH_HOST", "0.0.0.0"), port=8080)
+    uvicorn.run(
+        app,
+        host=os.environ.get("BT_DASH_HOST", "0.0.0.0"),
+        port=int(os.environ.get("BT_DASH_PORT", "8080")),
+    )

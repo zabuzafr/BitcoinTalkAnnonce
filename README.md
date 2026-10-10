@@ -1,142 +1,159 @@
-# Bitcointalk POW Scanner 🔍⛏️
+# BitcoinTalk Announcement Analyzer
 
-**Scan BitcoinTalk announcement discussions to find new Proof-of-Work serious projects**
+A web application that analyzes BitcoinTalk forum announcements using LLMs for sentiment analysis, risk assessment, and detailed report generation.
 
-## 🎯 Project Overview
+## Features
 
-An AI-powered scanner that analyzes BitcoinTalk "Announcements (ALT)" posts to identify
-legitimate, technically-sound Proof-of-Work (POW) projects, then serves the results
-through a local web dashboard and REST API.
+- **Real-time Analysis**: Process BitcoinTalk thread announcements and extract key information
+- **Model Selector**: Choose between different LLM models for analysis
+- **Progress Tracking**: Monitor analysis progress with real-time updates
+- **Multi-language Support**: English and French interfaces
+- **Detailed Reports**: Comprehensive analysis including sentiment, risk level, and executive summaries
 
-Components:
+## Tech Stack
 
-| File | Role |
-|---|---|
-| `bitcointalk.py` | Crawler + LLM analysis + scoring + SQLite persistence (CLI) |
-| `dashboard.py` | FastAPI web dashboard + JSON API (port 8080, host `127.0.0.1`) |
-| `i18n.py` | i18n engine (lazy keys, `**kwargs` interpolation, fallback chain) |
-| `locales/fr.json`, `locales/en.json` | Translation catalogs (92 keys each) |
-| `tests/` | Test suite (77 tests) |
+- **Backend**: Python 3, FastAPI/Uvicorn
+- **Database**: SQLite
+- **Frontend**: Vanilla JavaScript, HTML
+- **LLM Integration**: Ollama (local, default) or any OpenAI-compatible API
 
-## ✨ Key Features
+## Installation
 
-- 🔍 **Automated BitcoinTalk crawling** of the *Announcements (ALT)* section
-- 🧠 **Local LLM due diligence** via Ollama (non-blocking: if Ollama is down, parsing & scoring still run)
-- 📊 **Weighted scoring** with explicit red flags (premine tiers, forks, unrealistic claims)
-- 📈 **Web dashboard** — responsive HTML + JSON API, no external JS dependencies
-- 🌍 **Multilingual (fr + en)** — client-side language switcher, persisted in `localStorage`, served from `/api/i18n/{lang}`
-- 🧪 **Tested** — 77 tests covering scoring, i18n, API endpoints, security behavior
-- 🔒 **Security hardened** — localhost binding by default, SSRF-safe URL validation, HTML escaping of LLM output
-
-## 🚀 How It Works
-
-1. **Scan**: `bitcointalk.py` crawls announcement pages with `aiohttp` + `BeautifulSoup`
-2. **Extract**: parses title, body, premine, fork claims, roadmap, red flags
-3. **Analyze**: Ollama LLM performs technical due diligence (skipped gracefully if unavailable)
-4. **Score**: weighted scoring → `premine > 20 % → -30`, `> 10 % → -20`, `> 5 % → -10`,
-   red flags `min(30, 10 × count)`, fork `+10` penalty, unrealistic claims `+20` penalty
-5. **Store**: projects + history in SQLite (`crypto_analysis.db`)
-6. **Serve**: dashboard + API on `http://127.0.0.1:8080`
-
-## 🛠️ Technical Stack
-
-- **Python 3.14** (3.9+ supported)
-- **Ollama** (`localhost:11434`) — local LLM, default model `llama3.1`
-- **aiohttp / beautifulsoup4** — async crawling and HTML parsing
-- **FastAPI + Uvicorn** — dashboard and REST API
-- **SQLite** — persistence (stdlib, no migrations needed)
-- **pandas** — data analysis and reports
-- **pytest + httpx** — test suite (dev)
-
-## 📦 Installation
-
+1. Clone the repository:
 ```bash
-git clone https://github.com/zabuzafr/BitcoinTalkAnnonce.git
+git clone <repository-url>
 cd BitcoinTalkAnnonce
+```
 
-python -m venv .venv
-source .venv/bin/activate
+2. Create and activate virtual environment:
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+3. Install dependencies (if any):
+```bash
 pip install -r requirements.txt
-
-# Install Ollama (https://ollama.ai), if not already present
-curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull llama3.1
 ```
 
-## ⚙️ Configuration & CLI
+4. Configure the LLM (optional — defaults to Ollama at `http://localhost:11434`):
+either from the web interface (gear icon → LLM panel), or by creating
+`llm_config.json` in the project root (path overridable via `BT_LLM_CONFIG`):
+```json
+{
+    "provider": "ollama",
+    "model": "llama3.1",
+    "ollama_host": "http://localhost:11434",
+    "api_base": "",
+    "api_key": "",
+    "temperature": 0.2,
+    "timeout": 120
+}
+```
+For an OpenAI-compatible API, use `"provider": "openai"` with `api_base`
+(e.g. `https://api.openai.com/v1`) and `api_key`. The API key is stored in this
+file only (never in the database) — keep it out of version control
+(`llm_config.json` is git-ignored).
 
-All defaults can be overridden by environment variables:
-
-| Flag | Env | Default | Description |
-|---|---|---|---|
-| `--model` | `BT_MODEL` | `llama3.1` | Ollama model to use |
-| `--base-url` | `BT_BASE_URL` | `https://bitcointalk.org` | Forum base URL |
-| `--section` | `BT_BOARD_ID` | `159` | Board id (*Announcements (ALT)*) |
-| `--pages` | `BT_PAGES` | `2` | Number of pages to scan |
-| `--db` | `BT_DB_PATH` | `crypto_analysis.db` | SQLite database path |
-| `--timeout` | `BT_TIMEOUT` | `30` | HTTP timeout (seconds) |
-| — | `BT_LOG_FILE` | *(log file)* | Log file path |
-| — | `BT_DASH_HOST` | `127.0.0.1` | Dashboard bind address |
-
-## 🚦 Running
-
+5. Run the application:
 ```bash
-# 1. Scan & analyze (produces crypto_analysis.db + crypto_analysis_report.json)
-python bitcointalk.py
-
-# 2. Start the dashboard
 python dashboard.py
-# → http://127.0.0.1:8080
 ```
 
-### REST API
+The server will start at `http://localhost:8080`
 
-| Endpoint | Description |
-|---|---|
-| `GET /` | HTML dashboard |
-| `GET /api/i18n/languages` | Available languages |
-| `GET /api/i18n/{lang}` | Translation catalog |
-| `GET /api/stats` | Aggregate statistics |
-| `GET /api/projects` | List of analyzed projects |
-| `GET /api/projects/{topic_id}` | Project details (localized) |
-| `GET /api/history/{topic_id}` | Analysis history for a project |
+## API Endpoints
 
-## 🌍 Multilingual
+### `POST /api/scan`
+Start a scan of a Bitcointalk section. Body: `{"section_id": 159, "pages": 5}`
+(max 20 pages). Returns `202` with a `scan_id` if a scan starts, or `202` with
+the running `scan_id` if one is already in progress.
 
-- Catalogs in `locales/*.json` (flat dotted keys merged over a base catalog)
-- Server-side: `from i18n import T` — `T.t("key", **kwargs)`
-- Client-side: language switcher in the dashboard, choice saved in `localStorage`,
-  catalogs fetched from `/api/i18n/{lang}`
-- Fallback chain: `locale → default (en)` for unknown keys/languages
-- Adding a language = drop a new `locales/{lang}.json` + one entry in `available_languages`
+### `GET /api/scan/status`
+Live scan progress: `status` (`idle`/`running`/`done`/`error`), `pages_done`,
+`topics_found`, `analyzed_count`, `skipped_count`.
 
-## 🧪 Tests
+### `POST /api/reanalyze/{topic_id}`
+Trigger analysis of a BitcoinTalk thread announcement.
 
+**Request Body (both fields optional):**
+```json
+{
+    "model": "mistral:7b"
+}
+```
+
+**Response:**
+```json
+{
+    "ok": true,
+    "topic_id": 1
+}
+```
+
+## Usage
+
+1. Open the web interface at `http://localhost:8080`
+2. Pick a section and a page count in the sidebar, then start a scan
+3. Watch live progress (pages scanned, topics found, analysed, skipped)
+4. Open a project in the table to read its full report
+5. Choose a model in the report footer and trigger a reanalysis if needed
+
+## Screenshots
+
+### Main Dashboard
+![Main Dashboard](docs/screenshots/dashboard.png)
+*Overview with KPIs, charts by period and algorithm, and the scan controls in the sidebar*
+
+### Progress Monitoring
+![Progress Monitoring](docs/screenshots/progress.png)
+*Live scan progress — pages scanned and current status in the tools panel*
+
+### Analysis Report
+![Analysis Report](docs/screenshots/report.png)
+*Project detail sheet: detailed scores, announcement information, external sources and code maturity*
+
+### Model Selector
+![Model Selector](docs/screenshots/model-selector.png)
+*Footer of the detail sheet: choose an AI model, then trigger a reanalysis*
+
+## Configuration
+
+### Database
+The application uses SQLite for data storage. Database file is created automatically at `crypto_analysis.db` (project root).
+
+### Language Support
+- Interface available in English and French, selectable in the app and persisted per browser
+- Server default language via the `APP_LANGUAGE` environment variable (defaults to `fr`)
+- Translations available in `locales/en.json` and `locales/fr.json`
+- Add new translations to maintain consistency across both locales
+
+### LLM Models
+- Default: Ollama, model `llama3.1` (any model installed locally is selectable
+  in the interface — the list is read live from Ollama)
+- OpenAI-compatible providers: any model name offered by your `api_base`
+
+## Development
+
+### Project Structure
+- `dashboard.py` - Main FastAPI application
+- `bitcointalk.py` - BitcoinTalk analysis logic
+- `llm.py` - LLM providers (Ollama / OpenAI-compatible) and configuration
+- `static/` - Frontend assets (HTML, CSS, JavaScript)
+- `locales/` - Translation files (fr, en)
+- `tests/` - Pytest suite
+- `docs/screenshots/` - README screenshots
+
+### Running Tests
 ```bash
-pip install -r requirements-dev.txt   # pytest, httpx
-.venv/bin/pytest tests/
+source venv/bin/activate
+python3 -m pytest tests/ -q
 ```
 
-Result: **77 passed** — scoring tiers, i18n catalog/fallback/interpolation,
-API endpoints (FastAPI TestClient), and security behavior (localhost binding, output escaping).
+## License
 
-## 🔒 Security Notes
+[Specify your license here]
 
-- Dashboard binds to `127.0.0.1` by default (override with `BT_DASH_HOST` only if intentional)
-- LLM-generated text is HTML-escaped before being injected into dashboard markup
-- Relative/malformed project URLs are normalized against the base URL and validated before storage/fetch
+## Contributing
 
-## 📋 Detection Criteria
-
-✅ **Positive** — fair launch / low premine, original codebase, whitepaper, active GitHub,
-novel algorithm, realistic roadmap
-
-🚩 **Red flags** — excessive premine (>20 %), vague marketing only, closed source,
-fork/copy-paste, unrealistic ROI claims, anonymous team
-
-## 🎯 Use Cases
-
-- Early detection of promising POW projects
-- Automated technical due diligence for new coins
-- Research tracking of emerging POW cryptocurrencies
-- Community/developer activity monitoring
+[Add contribution guidelines if applicable]
