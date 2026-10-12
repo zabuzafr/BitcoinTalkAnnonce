@@ -1,5 +1,6 @@
 """v2 endpoints: i18n catalog, stats, timeseries, by_algorithm, list, scan, analyze."""
 
+import asyncio
 import json
 import re
 import sqlite3
@@ -463,6 +464,7 @@ class TestAnalyze:
             _restore(original)
         assert r.status_code == 503
         assert r.json()["detail"] == "llm_unavailable"
+        assert r.json()["reason"] == "injoignable"
 
     def test_analyze_unknown_topic(self, tmp_path, monkeypatch):
         db_file = str(tmp_path / "ana_unk.db")
@@ -547,7 +549,7 @@ class TestScan:
 
     def test_status_while_running(self, tmp_path, monkeypatch):
         async def fake_scan(scan_id, section_id, pages):
-            await _asyncio.sleep(0.2)
+            await asyncio.sleep(0.2)
         monkeypatch.setattr(dashboard, "_run_scan", fake_scan)
         original = dashboard.DB_PATH
         dashboard.DB_PATH = str(tmp_path / "scan2.db")
@@ -560,7 +562,7 @@ class TestScan:
             _restore(original)
         assert r.status_code == 200
         body = r.json()
-        assert body["status"] in ("running", "completed", "failed")
+        assert body["status"] == "running"
         assert body["pages_total"] >= 1
 
     def test_status_idle(self):

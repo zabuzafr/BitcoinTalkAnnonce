@@ -113,8 +113,9 @@ async function fetchJSON(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) {
     let detail = "HTTP " + response.status;
+    let body = null;
     try {
-      const body = await response.json();
+      body = await response.json();
       if (body && body.detail) detail = errorDetail(body.detail);
       else if (body && body.error) detail = String(body.error);
     } catch (e) {
@@ -122,6 +123,7 @@ async function fetchJSON(url, options) {
     }
     const error = new Error(detail);
     error.status = response.status;
+    if (body && body.reason) error.reason = String(body.reason);
     throw error;
   }
   return response.json();
@@ -968,7 +970,8 @@ async function actCall(topicId, action) {
     openDetail(topicId);
   } catch (e) {
     if (e.message.indexOf("analyzing") >= 0) toast(t("dashboard.error_busy"), true);
-    else if (/(ollama|llm)_unavailable/.test(e.message)) toast(t("dashboard.error_down"), true);
+    else if (/(ollama|llm)_unavailable/.test(e.message))
+      toast(t("dashboard.error_down") + (e.reason ? " — " + e.reason : ""), true);
     else toast(e.message, true);
   }
 }

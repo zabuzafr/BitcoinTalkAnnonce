@@ -1,0 +1,4 @@
+[tool.ruff]
+# Pas de style (E501, indentation…) : uniquement ce qui casse ou masque un bug.
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

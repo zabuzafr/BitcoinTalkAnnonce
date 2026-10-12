@@ -122,6 +122,11 @@ Trigger analysis of a BitcoinTalk thread announcement.
 ### Database
 The application uses SQLite for data storage. Database file is created automatically at `crypto_analysis.db` (project root).
 
+### Network
+The dashboard listens on `127.0.0.1:8080` by default and has **no
+authentication**. To expose it on a trusted LAN, set `BT_DASH_HOST=0.0.0.0`
+(the port is set with `BT_DASH_PORT`).
+
 ### Language Support
 - Interface available in English and French, selectable in the app and persisted per browser
 - Server default language via the `APP_LANGUAGE` environment variable (defaults to `fr`)
@@ -152,7 +157,7 @@ python3 -m pytest tests/ -q
 
 ## License
 
-[Specify your license here]
+[MIT](LICENSE) — see [LICENSE](LICENSE) for the full text.
 
 ## Contributing
 

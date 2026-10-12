@@ -493,7 +493,10 @@ async def api_project_analyze(request: Request, topic_id: int) -> Dict[str, Any]
     # reste du dashboard gelent le temps de la sonde (jusqu'à 15 s).
     available, detail = await asyncio.to_thread(_llm_available)
     if not available:
-        raise HTTPException(status_code=503, detail="llm_unavailable")
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "llm_unavailable", "reason": detail or ""},
+        )
     asyncio.create_task(_do_reanalyze(topic_id))
     return {"topic_id": topic_id, "status": "queued"}
 
@@ -833,7 +836,10 @@ async def api_reanalyze(topic_id: int, body: Optional[Dict[str, Any]] = None) ->
     # reste du dashboard gelent le temps de la sonde (jusqu'à 15 s).
     available, detail = await asyncio.to_thread(_llm_available)
     if not available:
-        raise HTTPException(status_code=503, detail="llm_unavailable")
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "llm_unavailable", "reason": detail or ""},
+        )
 
     _reanalyzing.add(topic_id)
     body = body or {}
@@ -846,8 +852,10 @@ async def api_reanalyze(topic_id: int, body: Optional[Dict[str, Any]] = None) ->
 if __name__ == "__main__":
     import uvicorn
 
+    # Sans authentification : écoute locale par défaut. Exposition LAN
+    # explicite via BT_DASH_HOST=0.0.0.0 (réseau de confiance uniquement).
     uvicorn.run(
         app,
-        host=os.environ.get("BT_DASH_HOST", "0.0.0.0"),
+        host=os.environ.get("BT_DASH_HOST", "127.0.0.1"),
         port=int(os.environ.get("BT_DASH_PORT", "8080")),
     )
