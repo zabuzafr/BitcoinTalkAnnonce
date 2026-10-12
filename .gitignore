@@ -10,3 +10,8 @@ __pycache__/
 crypto_analysis_report.json
 # Configuration LLM : peut contenir une cle API
 llm_config.json
+# Documentation de travail et compétences d'agents ( locales)
+ARCHITECTURE.md
+.skills/
+.agents/
+skills-lock.json
